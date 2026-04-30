@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -11,7 +12,7 @@ from .models import Segment, build_segment_id
 SRT_TIME_RE = re.compile(
     r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})"
 )
-LRC_TIME_RE = re.compile(r"\[(\d{2}):(\d{2}(?:\.\d{1,3})?)\]\s*(.*)")
+LRC_TIME_RE = re.compile(r"\[(?:(\d{2}):)?(\d{2}):(\d{2}(?:\.\d{1,3})?)\]\s*(.*)")
 LIVEID_RE = re.compile(r"LiveId@(\d+)")
 TS_RE = re.compile(r"_(\d{14})(?:_info)?\.")
 
@@ -98,17 +99,50 @@ def parse_lrc(lrc_path: Path, record: dict) -> list[Segment]:
         return []
     live_dt = extract_live_datetime(Path(record.get("metadata_path", "")), Path(record["video_path"]))
     segments: list[Segment] = []
-    for line in lrc_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = line.strip()
+    lines = lrc_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
         if not line:
+            i += 1
             continue
+        
         m = LRC_TIME_RE.match(line)
         if not m:
+            i += 1
             continue
-        text = m.group(3).strip()
+        
+        hours = int(m.group(1) or 0)
+        minutes = int(m.group(2))
+        seconds = float(m.group(3))
+        start = hours * 3600 + minutes * 60 + seconds
+        
+        # 分离观众ID和弹幕文本（ID和文本之间用\t隔开）
+        content = m.group(4).strip()  # ID\t文本
+        if '\t' in content:
+            user_id, text = content.split('\t', 1)
+        else:
+            # 使用content的哈希值作为唯一user_id
+            user_id = hashlib.sha256(content.encode()).hexdigest()[:16]
+            text = content
+        
+        # 处理可能的多行弹幕：如果下一行不以[开头，则认为是当前弹幕的继续
+        i += 1
+        while i < len(lines):
+            next_line = lines[i]
+            if LRC_TIME_RE.match(next_line):
+                # 下一行是新的时间戳，停止累加
+                break
+            # 如果下一行有内容但不是时间戳，则属于当前弹幕
+            if next_line.strip():
+                text += '\n' + next_line.strip()
+            i += 1
+        
+        text = text.strip()
         if not text:
             continue
-        start = int(m.group(1)) * 60 + float(m.group(2))
+        
         sid = build_segment_id(record["live_id"], "danmaku", start, text)
         segments.append(
             Segment(
@@ -120,11 +154,12 @@ def parse_lrc(lrc_path: Path, record: dict) -> list[Segment]:
                 file_path=str(lrc_path),
                 video_path=record["video_path"],
                 video_title=record.get("title", ""),
-                anchor_name=record.get("user_name", ""),
+                anchor_name=user_id,
                 live_id=record["live_id"],
                 video_datetime=live_dt.isoformat(),
             )
         )
+    
     return segments
 
 

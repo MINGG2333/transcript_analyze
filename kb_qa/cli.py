@@ -3,9 +3,70 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from .qa import VideoKnowledgeQA
+
+
+def setup_logger():
+    """设置日志系统，使用loguru或回退到简单日志"""
+    try:
+        from loguru import logger
+        # 移除默认的处理器，添加我们自己的格式
+        logger.remove()
+        # 添加控制台输出
+        logger.add(
+            sys.stderr,
+            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>",
+            level="INFO"
+        )
+        # 添加文件输出，带轮转
+        logger.add(
+            "kb_qa.log",
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+            level="INFO",
+            rotation="10 MB",
+            # retention="30 days"
+        )
+        return logger
+    except ImportError:
+        # 简单的日志类（回退方案）
+        class SimpleLogger:
+            def __init__(self):
+                self.level_colors = {
+                    "INFO": "\033[94m",      # 蓝色
+                    "SUCCESS": "\033[92m",   # 绿色
+                    "WARNING": "\033[93m",   # 黄色
+                    "ERROR": "\033[91m",     # 红色
+                    "RESET": "\033[0m"       # 重置
+                }
+            
+            def _log(self, message, level="INFO"):
+                color = self.level_colors.get(level, self.level_colors["RESET"])
+                reset = self.level_colors["RESET"]
+                print(f"{color}[{level}] {message}{reset}")
+            
+            def info(self, message):
+                self._log(message, "INFO")
+            
+            def success(self, message):
+                self._log(message, "SUCCESS")
+            
+            def warning(self, message):
+                self._log(message, "WARNING")
+            
+            def error(self, message):
+                self._log(message, "ERROR")
+            
+            def debug(self, message):
+                # 简单日志类中debug和info一样
+                self._log(message, "INFO")
+            
+            def critical(self, message):
+                self._log(message, "ERROR")
+        
+        return SimpleLogger()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    logger = setup_logger()
     args = build_parser().parse_args()
     qa = VideoKnowledgeQA(
         records_path=Path(args.records),
@@ -39,14 +101,18 @@ def main() -> None:
         llm_model=args.llm_model,
         api_base=args.api_base,
         api_key=args.api_key,
+        logger=logger,
     )
 
     if args.command == "build":
+        logger.info("开始执行build命令")
         stat = qa.build_or_update()
         print(json.dumps(stat, ensure_ascii=False, indent=2))
+        logger.success("build命令执行完成")
         return
 
     if args.command == "ask":
+        logger.info(f"开始执行ask命令: {args.question}")
         out = qa.ask(
             question=args.question,
             vector_top_k=args.vector_top_k,
@@ -54,6 +120,7 @@ def main() -> None:
             context_window=args.context_window,
         )
         print(json.dumps(out, ensure_ascii=False, indent=2))
+        logger.success("ask命令执行完成")
         return
 
 

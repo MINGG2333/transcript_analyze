@@ -2,4 +2,5 @@ chromadb
 sentence-transformers
 openai
 rank-bm25
+loguru
 

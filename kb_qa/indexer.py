@@ -92,7 +92,8 @@ class VectorIndex:
             metadata={"hnsw:space": "cosine"},
         )
 
-    def upsert(self, segments: list[Segment], batch_size: int = 400) -> None:
+    def upsert(self, segments: list[Segment], batch_size: int = 400, logger=None) -> None:
+        total = len(segments)
         for i in range(0, len(segments), batch_size):
             batch = segments[i : i + batch_size]
             self.collection.upsert(
@@ -114,6 +115,10 @@ class VectorIndex:
                     for x in batch
                 ],
             )
+            if logger:
+                processed = min(i + batch_size, total)
+                progress_pct = (processed * 100) // total
+                logger.info(f"向量索引更新进度: {processed}/{total} ({progress_pct}%)")
 
     def retrieve(self, query: str, top_k: int = 30) -> list[str]:
         result = self.collection.query(

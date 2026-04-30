@@ -1,3 +1,6 @@
-download_records.json
 __pycache__/
+
+download_records.json
 pocket48_downloads/
+video_knowledge_db*/
+*.log
