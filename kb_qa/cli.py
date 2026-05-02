@@ -9,8 +9,9 @@ from pathlib import Path
 from .qa import VideoKnowledgeQA
 
 
-def setup_logger():
+def setup_logger(debug: bool = False):
     """设置日志系统，使用loguru或回退到简单日志"""
+    level = "DEBUG" if debug else "INFO"
     try:
         from loguru import logger
         # 移除默认的处理器，添加我们自己的格式
@@ -19,7 +20,7 @@ def setup_logger():
         logger.add(
             sys.stderr,
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>",
-            level="INFO"
+            level=level
         )
         # 添加文件输出，带轮转
         logger.add(
@@ -75,24 +76,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--subtitle-root", default="firered_output_batch", help="字幕输出根目录")
     p.add_argument("--kb-dir", default="video_knowledge_db", help="知识库持久化目录")
     p.add_argument("--embedding-model", default="shibing624/text2vec-base-chinese", help="向量模型")
-    p.add_argument("--llm-model", default="gpt-4o-mini", help="问答LLM模型名")
-    p.add_argument("--api-base", default=os.getenv("OPENAI_BASE_URL"), help="LLM API base url")
-    p.add_argument("--api-key", default=os.getenv("OPENAI_API_KEY"), help="LLM API key")
+    p.add_argument("--llm-model", default="deepseek-v4-flash", help="问答LLM模型名")
+    p.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")
+    p.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY"), help="LLM API key")
+    p.add_argument("--debug", action="store_true", help="开启调试日志，打印更多内部信息")
 
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("build", help="构建或增量更新知识库")
 
     ask = sub.add_parser("ask", help="执行问答")
     ask.add_argument("--question", required=True, help="用户问题")
-    ask.add_argument("--vector-top-k", type=int, default=40)
-    ask.add_argument("--bm25-top-k", type=int, default=40)
-    ask.add_argument("--context-window", type=int, default=3)
+    ask.add_argument("--vector-top-k", type=int, default=1000, help="向量检索的候选数")
+    ask.add_argument("--bm25-top-k", type=int, default=1000, help="BM25检索的候选数")
+    ask.add_argument("--vector-score-threshold", type=float, default=0.31, help="向量检索相关性阈值 [0-1]")
+    ask.add_argument("--bm25-score-threshold", type=float, default=11.0, help="BM25检索相关性阈值")
+    ask.add_argument("--context-window", type=int, default=10, help="上下文扩展窗口大小")
+    ask.add_argument("--analysis-batch-size", type=int, default=100, help="逐批分析候选片段时每批的最大数量")
     return p
 
 
 def main() -> None:
-    logger = setup_logger()
     args = build_parser().parse_args()
+    logger = setup_logger(debug=args.debug)
     qa = VideoKnowledgeQA(
         records_path=Path(args.records),
         subtitle_root=Path(args.subtitle_root),
@@ -107,7 +112,7 @@ def main() -> None:
     if args.command == "build":
         logger.info("开始执行build命令")
         stat = qa.build_or_update()
-        print(json.dumps(stat, ensure_ascii=False, indent=2))
+        # print(json.dumps(stat, ensure_ascii=False, indent=2))
         logger.success("build命令执行完成")
         return
 
@@ -118,9 +123,11 @@ def main() -> None:
             vector_top_k=args.vector_top_k,
             bm25_top_k=args.bm25_top_k,
             context_window=args.context_window,
+            vector_score_threshold=args.vector_score_threshold,
+            bm25_score_threshold=args.bm25_score_threshold,
+            analysis_batch_size=args.analysis_batch_size,
         )
-        print(json.dumps(out, ensure_ascii=False, indent=2))
-        logger.success("ask命令执行完成")
+        logger.success(f"ask命令执行完成，归档文件: {out.get('archive_path', 'N/A')}")
         return
 
 

@@ -39,12 +39,11 @@ config.json: 100%|████████████████████�
 
 ```bash
 python run_kb_qa.py \
-  --question "我想知道视频中的人在哪些时候提到了养的宠物狗顺顺，请按时间顺序列出" \
   --records download_records.json \
   --subtitle-root firered_output_batch \
   --kb-dir video_knowledge_db \
-  --llm-model gpt-4o-mini \
-  ask
+  ask \
+  --question "我想知道视频中的人在哪些时候提到了养的宠物狗顺顺，请按时间顺序列出"
 ```
 
 ## 4) 环境变量
