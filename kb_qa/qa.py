@@ -151,7 +151,7 @@ class VideoKnowledgeQA:
         bm25_top_k: int = 40,
         context_window: int = 3,
         vector_score_threshold: float = 0.3,
-        bm25_score_threshold: float = 2.0,
+        bm25_score_threshold: float = 15.0,
         max_base_segments: Optional[int] = None,
         max_expanded_segments: Optional[int] = None,
     ) -> tuple[list[Segment], dict[str, Any]]:
@@ -290,9 +290,7 @@ class VideoKnowledgeQA:
             {
                 "role": "user",
                 "content": (
-                    "你是一个中文检索查询优化助手。请把下面的用户问题改写成一个适用于BM25检索的简洁查询，\n"
-                    "去掉“为什么”“什么”等无意义疑问词和口语化表达，保留关键实体，\n"
-                    "使检索更聚焦。\n"
+                    "你是一个中文检索查询优化助手。请把下面的用户问题改写成一个或多个关键词，用于BM25检索。规则：只保留问题中的核心命名实体，去掉疑问词、助词和无关表达。若该名称由重复的单一汉字组成（如“顺顺”），则需同时输出该单字和完整名称。基本原则是用这些关键词搜索到的文本范围内会有问题的答案，关键词越少越好，每增加一个关键词，需要缩小搜索范围而不是扩大。\\n"
                     f"用户问题：{question}\n"
                     "请输出JSON对象：{\"refined_query\":\"...\"}。\n"
                     "仅输出JSON，不要额外文本。"
@@ -539,7 +537,7 @@ class VideoKnowledgeQA:
         bm25_top_k: int = 1000,
         context_window: int = 3,
         vector_score_threshold: float = 0.3,
-        bm25_score_threshold: float = 2.0,
+        bm25_score_threshold: float = 15.0,
         analysis_batch_size: int = 20,
     ) -> dict[str, Any]:
         self._ensure_client()
