@@ -92,6 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--bm25-score-threshold", type=float, default=15.0, help="BM25检索相关性阈值")
     ask.add_argument("--context-window", type=int, default=6, help="上下文扩展窗口大小")
     ask.add_argument("--analysis-batch-size", type=int, default=100, help="逐批分析候选片段时每批的最大数量")
+    ask.add_argument("--synthesis-context-window", type=int, default=6, help="最终合成阶段每个有用段的局部上下文窗口大小")
+    ask.add_argument("--synthesis-batch-trigger-count", type=int, default=100, help="有用段数量超过该阈值时启用分批合成")
+    ask.add_argument("--synthesis-batch-size", type=int, default=50, help="分批合成时每批处理的有用段数量")
     return p
 
 
@@ -126,6 +129,9 @@ def main() -> None:
             vector_score_threshold=args.vector_score_threshold,
             bm25_score_threshold=args.bm25_score_threshold,
             analysis_batch_size=args.analysis_batch_size,
+            synthesis_context_window=args.synthesis_context_window,
+            synthesis_batch_trigger_count=args.synthesis_batch_trigger_count,
+            synthesis_batch_size=args.synthesis_batch_size,
         )
         logger.success(f"ask命令执行完成，归档文件: {out.get('archive_path', 'N/A')}")
         return

@@ -506,10 +506,20 @@ class VideoKnowledgeQA:
         }
         return analysis, useful_segments, summary, llm_calls
 
-    def _build_synthesis_prompt(self, question: str, useful_segments: list[Segment]) -> list[dict[str, str]]:
+    def _build_synthesis_prompt(
+        self,
+        question: str,
+        useful_segments: list[Segment],
+        synthesis_context_window: int,
+    ) -> list[dict[str, str]]:
         lines: list[str] = []
         for s in useful_segments:
-            lines.append(self._format_segment_with_local_context(s))
+            lines.append(
+                self._format_segment_with_local_context(
+                    s,
+                    context_window=synthesis_context_window,
+                )
+            )
         context = "\n".join(lines)
         return [
             {
@@ -533,11 +543,16 @@ class VideoKnowledgeQA:
         ]
 
     def _build_batch_synthesis_prompt(
-        self, question: str, segments: list[Segment], batch_index: int, total_batches: int
+        self,
+        question: str,
+        segments: list[Segment],
+        batch_index: int,
+        total_batches: int,
+        synthesis_context_window: int,
     ) -> list[dict[str, str]]:
         lines: list[str] = []
         for s in segments:
-            lines.append(self._format_segment_with_local_context(s))
+            lines.append(self._format_segment_with_local_context(s, context_window=synthesis_context_window))
         context = "\n".join(lines)
         return [
             {
@@ -563,6 +578,7 @@ class VideoKnowledgeQA:
         question: str,
         useful_segments: list[Segment],
         batch_size: int = 200,
+        synthesis_context_window: int = 6,
     ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
         """用分组合成的方式处理大量有用段。返回 (answer_text, final_evidence, llm_metadata)"""
         total_segments = len(useful_segments)
@@ -587,7 +603,13 @@ class VideoKnowledgeQA:
                 self.logger.info(f"处理第 {batch_idx + 1}/{total_batches} 批，包含 {len(batch)} 个片段")
             
             try:
-                prompt = self._build_batch_synthesis_prompt(question, batch, batch_idx + 1, total_batches)
+                prompt = self._build_batch_synthesis_prompt(
+                    question,
+                    batch,
+                    batch_idx + 1,
+                    total_batches,
+                    synthesis_context_window=synthesis_context_window,
+                )
                 parsed, llm_metadata = self._call_llm_json(
                     prompt,
                     f"批次合成 {batch_idx + 1}/{total_batches}",
@@ -649,7 +671,12 @@ class VideoKnowledgeQA:
             
             lines: list[str] = []
             for s in key_segments:
-                lines.append(self._format_segment_with_local_context(s))
+                lines.append(
+                    self._format_segment_with_local_context(
+                        s,
+                        context_window=synthesis_context_window,
+                    )
+                )
             context = "\n".join(lines)
             
             final_prompt = [
@@ -701,6 +728,7 @@ class VideoKnowledgeQA:
             "batch_synthesis": {
                 "total_segments": total_segments,
                 "batch_size": batch_size,
+                "synthesis_context_window": synthesis_context_window,
                 "total_batches": total_batches,
                 "batch_summaries": batch_summaries,
                 "batch_llm_calls": all_llm_calls,
@@ -778,6 +806,9 @@ class VideoKnowledgeQA:
         vector_score_threshold: float = 0.3,
         bm25_score_threshold: float = 15.0,
         analysis_batch_size: int = 20,
+        synthesis_context_window: int = 6,
+        synthesis_batch_trigger_count: int = 100,
+        synthesis_batch_size: int = 50,
     ) -> dict[str, Any]:
         self._ensure_client()
         if self.logger:
@@ -857,17 +888,26 @@ class VideoKnowledgeQA:
                     f"准备合成最终回答，使用 {len(useful_segments)} 个有用片段。"
                 )
             
-            # 当有用段数超过 500 时，使用分批合成
-            if len(useful_segments) > 100:
+            # 当有用段数超过阈值时，使用分批合成
+            if len(useful_segments) > synthesis_batch_trigger_count:
                 if self.logger:
-                    self.logger.info("有用段数较多，使用分批合成策略")
+                    self.logger.info(
+                        f"有用段数较多（>{synthesis_batch_trigger_count}），使用分批合成策略，batch_size={synthesis_batch_size}"
+                    )
                 answer_text, final_evidence, synthesis_llm_metadata = self._synthesize_with_batches(
-                    question, useful_segments, batch_size=50
+                    question,
+                    useful_segments,
+                    batch_size=synthesis_batch_size,
+                    synthesis_context_window=synthesis_context_window,
                 )
             else:
                 try:
                     parsed, synthesis_llm_metadata = self._call_llm_json(
-                        self._build_synthesis_prompt(question, useful_segments),
+                        self._build_synthesis_prompt(
+                            question,
+                            useful_segments,
+                            synthesis_context_window=synthesis_context_window,
+                        ),
                         "最终答案合成",
                     )
                     final_evidence = parsed.get("evidence", []) or []
@@ -912,14 +952,21 @@ class VideoKnowledgeQA:
                 continue
             interview_answer = ""
             interview_evidence: list[dict[str, Any]] = []
-            if len(interview_useful) > 500:
+            if len(interview_useful) > synthesis_batch_trigger_count:
                 interview_answer, interview_evidence, _ = self._synthesize_with_batches(
-                    question, interview_useful, batch_size=200
+                    question,
+                    interview_useful,
+                    batch_size=synthesis_batch_size,
+                    synthesis_context_window=synthesis_context_window,
                 )
             else:
                 try:
                     parsed, _ = self._call_llm_json(
-                        self._build_synthesis_prompt(question, interview_useful),
+                        self._build_synthesis_prompt(
+                            question,
+                            interview_useful,
+                            synthesis_context_window=synthesis_context_window,
+                        ),
                         f"访谈 {live_id} 答案合成",
                     )
                     interview_evidence = parsed.get("evidence", []) or []
