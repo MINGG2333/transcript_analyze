@@ -50,19 +50,15 @@ class VideoKnowledgeQA:
             self.logger.info(f"解析得到 {len(all_segments)} 个片段")
 
             # 统计不同类型的片段
-            speech_count = sum(1 for seg in all_segments if seg.source_type == "speech")
-            danmaku_count = sum(1 for seg in all_segments if seg.source_type == "danmaku")
-            self.logger.info(f"片段类型统计: 主播讲话({speech_count}) | 观众弹幕({danmaku_count})")
+            participant_types = {}
+            for seg in all_segments:
+                participant_types[seg.source_type] = participant_types.get(seg.source_type, 0) + 1
+            self.logger.info(f"片段类型统计: {participant_types}")
 
             self.logger.info("=== 示例片段（随机挑选） ===")
             sample_segments = []
-            if speech_count:
-                sample_segments.append(random.choice([seg for seg in all_segments if seg.source_type == "speech"]))
-            if danmaku_count:
-                sample_segments.append(random.choice([seg for seg in all_segments if seg.source_type == "danmaku"]))
-            if len(sample_segments) < 2 and all_segments:
-                sample_segments.append(random.choice(all_segments))
-
+            if all_segments:
+                sample_segments = random.sample(all_segments, min(3, len(all_segments)))
             for seg in sample_segments:
                 self.logger.info(f"[{seg.source_label}] 完整信息:")
                 self.logger.info(f"  segment_id: {seg.segment_id}")
@@ -77,43 +73,8 @@ class VideoKnowledgeQA:
                 self.logger.info(f"  video_offset: {seg.hhmmss}")
                 self.logger.info(f"  text: {seg.text!r}")
 
-            if danmaku_count == 0:
-                self.logger.warning("未解析到观众弹幕片段，请检查danmu_path和LRC文件格式是否正确")
-            
-            # 随机选取一些记录，详细统计其中的srt和lrc文件
-            self.logger.info("=== 随机文件详细统计 ===")
-            from .parsers import load_records, infer_subtitle_path, parse_srt, parse_lrc
-            records = load_records(self.records_path)
-            valid_records = [rec for rec in records.values() if rec.get("video_path")]
-            
-            if valid_records:
-                sample_records = random.sample(valid_records, min(2, len(valid_records)))
-                for rec in sample_records:
-                    srt_path = infer_subtitle_path(rec, self.subtitle_root)
-                    lrc_path = Path(rec.get("danmu_path", "")) if rec.get("danmu_path") else None
-                    
-                    self.logger.info(f"\n记录 LiveId={rec['live_id']} ({rec.get('title', 'N/A')})")
-                    
-                    if srt_path.exists():
-                        srt_segs = parse_srt(srt_path, rec)
-                        self.logger.info(f"  字幕文件 (SRT): {Path(srt_path)}")
-                        self.logger.info(f"    片段数: {len(srt_segs)}")
-                        if srt_segs:
-                            sample = random.choice(srt_segs)
-                            self.logger.info(f"    示例: [{sample.hhmmss}] {sample.anchor_name} | {sample.text[:80]!r}")
-                    else:
-                        self.logger.info(f"  字幕文件 (SRT): 不存在 ({srt_path})")
-                    
-                    if lrc_path and lrc_path.exists():
-                        lrc_segs = parse_lrc(lrc_path, rec)
-                        self.logger.info(f"  弹幕文件 (LRC): {Path(lrc_path)}")
-                        self.logger.info(f"    片段数: {len(lrc_segs)}")
-                        if lrc_segs:
-                            sample = random.choice(lrc_segs)
-                            self.logger.info(f"    示例: [{sample.hhmmss}] {sample.anchor_name} | {sample.text[:80]!r}")
-                    else:
-                        lrc_name = Path(rec.get("danmu_path", "unknown")) if rec.get("danmu_path") else "unknown"
-                        self.logger.info(f"  弹幕文件 (LRC): 不存在或未配置 ({lrc_name})")
+            if not all_segments:
+                self.logger.warning("未解析到任何片段，请检查VTT文件和记录格式是否正确")
         
         changed = self.store.upsert_many(all_segments)
         if self.logger:
@@ -154,6 +115,7 @@ class VideoKnowledgeQA:
         bm25_score_threshold: float = 15.0,
         max_base_segments: Optional[int] = None,
         max_expanded_segments: Optional[int] = None,
+        min_interviews: int = 1,
     ) -> tuple[list[Segment], dict[str, Any]]:
         if self.logger:
             self.logger.info(f"[1/5] 开始从向量索引检索，top_k={vector_top_k}, score_threshold={vector_score_threshold}")
@@ -231,7 +193,7 @@ class VideoKnowledgeQA:
 
         if self.logger:
             self.logger.info(f"[5/5] 开始上下文扩展，context_window={context_window}")
-        candidates = self.store.expand_context(merged_ids, context_window=context_window, logger=self.logger)
+        candidates = self.store.expand_context_with_diversity(merged_ids, context_window=context_window, min_interviews=min_interviews, logger=self.logger)
         if self.logger:
             self.logger.info(f"[5/5] 上下文扩展完成，得到 {len(candidates)} 个扩展后的片段")
 
@@ -721,6 +683,7 @@ class VideoKnowledgeQA:
         vector_score_threshold: float = 0.3,
         bm25_score_threshold: float = 15.0,
         analysis_batch_size: int = 20,
+        min_interviews: int = 1,
     ) -> dict[str, Any]:
         self._ensure_client()
         if self.logger:
@@ -736,6 +699,7 @@ class VideoKnowledgeQA:
             bm25_score_threshold=bm25_score_threshold,
             max_base_segments=None,  # 不限制基础段数
             max_expanded_segments=None,  # 不限制扩展段数
+            min_interviews=min_interviews,
         )
         if self.logger:
             self.logger.info(

@@ -13,6 +13,9 @@ SRT_TIME_RE = re.compile(
     r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})"
 )
 LRC_TIME_RE = re.compile(r"\[(?:(\d{2}):)?(\d{2}):(\d{2}(?:\.\d{1,3})?)\]\s*(.*)")
+VTT_TIME_RE = re.compile(
+    r"(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})"
+)
 LIVEID_RE = re.compile(r"LiveId@(\d+)")
 TS_RE = re.compile(r"_(\d{14})(?:_info)?\.")
 
@@ -94,72 +97,65 @@ def parse_srt(srt_path: Path, record: dict) -> list[Segment]:
     return segments
 
 
-def parse_lrc(lrc_path: Path, record: dict) -> list[Segment]:
-    if not lrc_path.exists():
+def parse_vtt(vtt_path: Path, record: dict) -> list[Segment]:
+    if not vtt_path.exists():
         return []
-    live_dt = extract_live_datetime(Path(record.get("metadata_path", "")), Path(record["video_path"]))
+    raw = vtt_path.read_text(encoding="utf-8", errors="ignore").strip()
+    if not raw or not raw.startswith("WEBVTT"):
+        return []
+
+    interview_dt = extract_live_datetime(Path(record.get("metadata_path", "")), Path(record["video_path"]))
     segments: list[Segment] = []
-    lines = lrc_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    
+    lines = raw.splitlines()
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        if not line:
+        if not line or line == "WEBVTT":
             i += 1
             continue
-        
-        m = LRC_TIME_RE.match(line)
+        # Skip cue ID if present
+        if not VTT_TIME_RE.search(line):
+            i += 1
+            continue
+        m = VTT_TIME_RE.search(line)
         if not m:
             i += 1
             continue
-        
-        hours = int(m.group(1) or 0)
-        minutes = int(m.group(2))
-        seconds = float(m.group(3))
-        start = hours * 3600 + minutes * 60 + seconds
-        
-        # 分离观众ID和弹幕文本（ID和文本之间用\t隔开）
-        content = m.group(4).strip()  # ID\t文本
-        if '\t' in content:
-            user_id, text = content.split('\t', 1)
-        else:
-            # 使用content的哈希值作为唯一user_id
-            user_id = hashlib.sha256(content.encode()).hexdigest()[:16]
-            text = content
-        
-        # 处理可能的多行弹幕：如果下一行不以[开头，则认为是当前弹幕的继续
+        start = seconds_from_srt_match(m, 1)
+        end = seconds_from_srt_match(m, 5)
         i += 1
-        while i < len(lines):
-            next_line = lines[i]
-            if LRC_TIME_RE.match(next_line):
-                # 下一行是新的时间戳，停止累加
-                break
-            # 如果下一行有内容但不是时间戳，则属于当前弹幕
-            if next_line.strip():
-                text += '\n' + next_line.strip()
+        text_lines = []
+        while i < len(lines) and lines[i].strip():
+            text_lines.append(lines[i].strip())
             i += 1
-        
-        text = text.strip()
+        text = " ".join(text_lines).strip()
         if not text:
             continue
-        
-        sid = build_segment_id(record["live_id"], "danmaku", start, text)
+        # Extract participant from <v name> tags
+        participant = "unknown"
+        if text.startswith("<v ") and ">" in text:
+            end_tag = text.find(">")
+            tag = text[3:end_tag]
+            participant = tag.strip()
+            text = text[end_tag+1:].strip()
+            if text.endswith("</v>"):
+                text = text[:-4].strip()
+        sid = build_segment_id(record["live_id"], participant, start, text)
         segments.append(
             Segment(
                 segment_id=sid,
                 text=text,
                 start_time=start,
-                end_time=start + 5.0,
-                source_type="danmaku",
-                file_path=str(lrc_path),
+                end_time=end,
+                source_type=participant,
+                file_path=str(vtt_path),
                 video_path=record["video_path"],
                 video_title=record.get("title", ""),
-                anchor_name=user_id,
+                anchor_name=participant,
                 live_id=record["live_id"],
-                video_datetime=live_dt.isoformat(),
+                video_datetime=interview_dt.isoformat(),
             )
         )
-    
     return segments
 
 
@@ -174,14 +170,8 @@ def load_records(records_path: Path) -> dict:
 def collect_segments(records_path: Path, output_root: Path) -> Iterable[Segment]:
     records = load_records(records_path)
     for rec in records.values():
-        if not rec.get("video_path"):
-            continue
-        srt_path = infer_subtitle_path(rec, output_root)
-        lrc_path = Path(rec.get("danmu_path", "")) if rec.get("danmu_path") else None
-
-        for seg in parse_srt(srt_path, rec):
-            yield seg
-        if lrc_path:
-            for seg in parse_lrc(lrc_path, rec):
+        vtt_path = Path(rec.get("vtt_path", "")) if rec.get("vtt_path") else None
+        if vtt_path:
+            for seg in parse_vtt(vtt_path, rec):
                 yield seg
 

@@ -1,6 +1,6 @@
 __pycache__/
 
-download_records.json
-pocket48_downloads/
-video_knowledge_db*/
 *.log
+interview_knowledge_db/
+interview_records.json
+README_QA_SYSTEM*.md

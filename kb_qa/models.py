@@ -11,13 +11,13 @@ class Segment:
     text: str
     start_time: float
     end_time: float
-    source_type: str  # speech | danmaku
+    source_type: str  # speech | danmaku -> participant
     file_path: str
-    video_path: str
-    video_title: str
-    anchor_name: str
-    live_id: str
-    video_datetime: str  # ISO8601
+    video_path: str  # -> vtt_path
+    video_title: str  # -> interview_title
+    anchor_name: str  # -> participant_name
+    live_id: str  # -> interview_id
+    video_datetime: str  # -> interview_date
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -32,7 +32,7 @@ class Segment:
 
     @property
     def source_label(self) -> str:
-        return "主播讲话" if self.source_type == "speech" else "观众弹幕"
+        return self.source_type
 
     @property
     def hhmmss(self) -> str:

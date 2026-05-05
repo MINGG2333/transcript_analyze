@@ -71,10 +71,10 @@ def setup_logger(debug: bool = False):
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="直播视频知识库问答系统")
-    p.add_argument("--records", default="download_records.json", help="下载记录JSON路径")
-    p.add_argument("--subtitle-root", default="firered_output_batch", help="字幕输出根目录")
-    p.add_argument("--kb-dir", default="video_knowledge_db", help="知识库持久化目录")
+    p = argparse.ArgumentParser(description="访谈视频知识库问答系统")
+    p.add_argument("--records", default="interview_records.json", help="访谈记录JSON路径")
+    p.add_argument("--subtitle-root", default="interview_output", help="字幕输出根目录")
+    p.add_argument("--kb-dir", default="interview_knowledge_db", help="知识库持久化目录")
     p.add_argument("--embedding-model", default="shibing624/text2vec-base-chinese", help="向量模型")
     p.add_argument("--llm-model", default="deepseek-v4-flash", help="问答LLM模型名")
     p.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")
@@ -92,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--bm25-score-threshold", type=float, default=11.0, help="BM25检索相关性阈值")
     ask.add_argument("--context-window", type=int, default=10, help="上下文扩展窗口大小")
     ask.add_argument("--analysis-batch-size", type=int, default=100, help="逐批分析候选片段时每批的最大数量")
+    ask.add_argument("--min-interviews", type=int, default=1, help="每个问题至少来自不同访谈的最小数量")
     return p
 
 
@@ -126,6 +127,7 @@ def main() -> None:
             vector_score_threshold=args.vector_score_threshold,
             bm25_score_threshold=args.bm25_score_threshold,
             analysis_batch_size=args.analysis_batch_size,
+            min_interviews=args.min_interviews,
         )
         logger.success(f"ask命令执行完成，归档文件: {out.get('archive_path', 'N/A')}")
         return

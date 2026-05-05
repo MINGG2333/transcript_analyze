@@ -88,6 +88,27 @@ class SegmentStore:
         
         return sorted(result.values(), key=lambda s: (s.video_datetime, s.start_time))
 
+    def expand_context_with_diversity(self, segment_ids: list[str], context_window: int = 3, min_interviews: int = 1, logger=None) -> list[Segment]:
+        # First, expand context normally
+        expanded = self.expand_context(segment_ids, context_window, logger)
+        
+        # Group by interview
+        by_interview: dict[str, list[Segment]] = defaultdict(list)
+        for seg in expanded:
+            by_interview[seg.live_id].append(seg)
+        
+        # If we have segments from at least min_interviews, ensure diversity
+        if len(by_interview) >= min_interviews:
+            # Sort interviews by number of segments, keep top min_interviews
+            sorted_interviews = sorted(by_interview.items(), key=lambda x: len(x[1]), reverse=True)
+            selected_segments = []
+            for interview_id, segs in sorted_interviews[:min_interviews]:
+                selected_segments.extend(segs)
+            return sorted(selected_segments, key=lambda s: (s.video_datetime, s.start_time))
+        else:
+            # Not enough diversity, return all
+            return expanded
+
 
 class VectorIndex:
     def __init__(self, db_dir: Path, embedding_model: str):
