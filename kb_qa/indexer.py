@@ -49,7 +49,7 @@ class SegmentStore:
     def _rebuild_live_source_index(self) -> None:
         idx: dict[str, list[str]] = defaultdict(list)
         for seg in self.segments.values():
-            key = f"{seg.live_id}::{seg.source_type}"
+            key = seg.live_id
             idx[key].append(seg.segment_id)
         for key, ids in idx.items():
             ids.sort(key=lambda sid: self.segments[sid].start_time)
@@ -62,7 +62,7 @@ class SegmentStore:
             seg = self.segments.get(sid)
             if not seg:
                 continue
-            key = f"{seg.live_id}::{seg.source_type}"
+            key = seg.live_id
             seq = self.by_live_source.get(key, [])
             if not seq:
                 result[sid] = seg
@@ -86,7 +86,7 @@ class SegmentStore:
         if logger:
             logger.info(f"  扩展统计: 基础段数={len(segment_ids)}, 扩展后总段数={len(result)}, 新增段数={expansion_count}")
         
-        return sorted(result.values(), key=lambda s: (s.video_datetime, s.start_time))
+        return sorted(result.values(), key=lambda s: s.start_time)
 
 class VectorIndex:
     def __init__(self, db_dir: Path, embedding_model: str):
