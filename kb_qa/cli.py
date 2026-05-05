@@ -26,7 +26,7 @@ def setup_logger(debug: bool = False):
         logger.add(
             "kb_qa.log",
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
-            level="INFO",
+            level=level,
             rotation="10 MB",
             # retention="30 days"
         )
@@ -88,9 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--question", required=True, help="用户问题")
     ask.add_argument("--vector-top-k", type=int, default=10000, help="向量检索的候选数")
     ask.add_argument("--bm25-top-k", type=int, default=10000, help="BM25检索的候选数")
-    ask.add_argument("--vector-score-threshold", type=float, default=0.31, help="向量检索相关性阈值 [0-1]")
-    ask.add_argument("--bm25-score-threshold", type=float, default=11.0, help="BM25检索相关性阈值")
-    ask.add_argument("--context-window", type=int, default=10, help="上下文扩展窗口大小")
+    ask.add_argument("--vector-score-threshold", type=float, default=0.332, help="向量检索相关性阈值 [0-1]")
+    ask.add_argument("--bm25-score-threshold", type=float, default=15.0, help="BM25检索相关性阈值")
+    ask.add_argument("--context-window", type=int, default=6, help="上下文扩展窗口大小")
     ask.add_argument("--analysis-batch-size", type=int, default=100, help="逐批分析候选片段时每批的最大数量")
     return p
 

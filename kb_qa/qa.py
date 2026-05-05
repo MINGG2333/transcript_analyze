@@ -360,7 +360,7 @@ class VideoKnowledgeQA:
     def _format_segment_with_local_context(
         self,
         segment: Segment,
-        context_window: int = 2,
+        context_window: int = 6,
     ) -> str:
         """格式化单个片段及其局部上下文，供合成阶段使用。"""
         key = f"{segment.live_id}::{segment.source_type}"
@@ -858,11 +858,11 @@ class VideoKnowledgeQA:
                 )
             
             # 当有用段数超过 500 时，使用分批合成
-            if len(useful_segments) > 500:
+            if len(useful_segments) > 100:
                 if self.logger:
                     self.logger.info("有用段数较多，使用分批合成策略")
                 answer_text, final_evidence, synthesis_llm_metadata = self._synthesize_with_batches(
-                    question, useful_segments, batch_size=200
+                    question, useful_segments, batch_size=50
                 )
             else:
                 try:
