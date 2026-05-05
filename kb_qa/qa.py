@@ -530,6 +530,188 @@ class VideoKnowledgeQA:
             }
         ]
 
+    def _build_batch_synthesis_prompt(
+        self, question: str, segments: list[Segment], batch_index: int, total_batches: int
+    ) -> list[dict[str, str]]:
+        lines: list[str] = []
+        for s in segments:
+            lines.append(
+                f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
+                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
+            )
+        context = "\n".join(lines)
+        return [
+            {
+                "role": "user",
+                "content": (
+                    "你是严谨的证据型问答助手。请根据下面的片段总结与问题相关的关键信息。\n"
+                    f"用户问题：{question}\n"
+                    f"这是第 {batch_index}/{total_batches} 批片段。\n\n"
+                    "片段列表：\n"
+                    f"{context}\n\n"
+                    "请输出JSON对象，格式为：\n"
+                    '{"summary":"...","key_segments":[{"segment_id":"...","reason":"..."}]}\n'
+                    "要求：\n"
+                    "1) summary中简洁地总结这批片段与问题的相关信息；\n"
+                    "2) key_segments列出该批最关键的5-10个segment_id及其原因；\n"
+                    "3) 仅输出JSON，不要额外文本。"
+                ),
+            }
+        ]
+
+    def _synthesize_with_batches(
+        self,
+        question: str,
+        useful_segments: list[Segment],
+        batch_size: int = 200,
+    ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+        """用分组合成的方式处理大量有用段。返回 (answer_text, final_evidence, llm_metadata)"""
+        total_segments = len(useful_segments)
+        total_batches = max(1, (total_segments + batch_size - 1) // batch_size)
+        
+        if self.logger:
+            self.logger.info(
+                f"准备分批合成最终回答，共 {total_segments} 个有用片段，分 {total_batches} 批处理"
+            )
+        
+        batch_summaries: list[dict[str, Any]] = []
+        key_segment_ids: set[str] = set()
+        all_llm_calls: list[dict[str, Any]] = []
+        
+        # 第一阶段：对每批片段进行合成
+        for batch_idx in range(total_batches):
+            start = batch_idx * batch_size
+            end = min(start + batch_size, total_segments)
+            batch = useful_segments[start:end]
+            
+            if self.logger:
+                self.logger.info(f"处理第 {batch_idx + 1}/{total_batches} 批，包含 {len(batch)} 个片段")
+            
+            try:
+                prompt = self._build_batch_synthesis_prompt(question, batch, batch_idx + 1, total_batches)
+                parsed, llm_metadata = self._call_llm_json(
+                    prompt,
+                    f"批次合成 {batch_idx + 1}/{total_batches}",
+                )
+                summary = parsed.get("summary", "").strip()
+                key_segs = parsed.get("key_segments", []) or []
+                
+                batch_summaries.append({
+                    "batch_index": batch_idx + 1,
+                    "summary": summary,
+                    "segment_count": len(batch),
+                })
+                
+                for seg_info in key_segs:
+                    if seg_info.get("segment_id"):
+                        key_segment_ids.add(seg_info["segment_id"])
+                
+                all_llm_calls.append(llm_metadata)
+                
+                if self.logger:
+                    self.logger.info(
+                        f"批次 {batch_idx + 1} 合成完成，共提取 {len(key_segs)} 个关键段"
+                    )
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"批次 {batch_idx + 1} 合成失败: {exc}，使用原始片段")
+                batch_summaries.append({
+                    "batch_index": batch_idx + 1,
+                    "summary": f"该批包含 {len(batch)} 个相关片段，无法生成摘要",
+                    "segment_count": len(batch),
+                    "error": str(exc),
+                })
+                all_llm_calls.append({
+                    "description": f"批次合成 {batch_idx + 1}/{total_batches}",
+                    "success": False,
+                    "error": str(exc),
+                })
+                # 如果合成失败，将此批所有段作为关键段保留
+                for seg in batch:
+                    key_segment_ids.add(seg.segment_id)
+        
+        # 第二阶段：基于所有批次的合成，生成最终答案
+        if self.logger:
+            self.logger.info(f"第一阶段合成完成，提取了 {len(key_segment_ids)} 个关键段，准备生成最终答案")
+        
+        # 选出关键段及所有段（确保完整性）
+        key_segments = [seg for seg in useful_segments if seg.segment_id in key_segment_ids]
+        
+        final_evidence: list[dict[str, Any]] = []
+        final_answer = ""
+        final_llm_metadata = {}
+        
+        try:
+            # 构建最终合成 prompt，包含批次摘要和关键段
+            batch_summary_text = "\n".join([
+                f"[第{s['batch_index']}批] {s['summary']}"
+                for s in batch_summaries
+            ])
+            
+            lines: list[str] = []
+            for s in key_segments:
+                lines.append(
+                    f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
+                    f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
+                )
+            context = "\n".join(lines)
+            
+            final_prompt = [
+                {
+                    "role": "user",
+                    "content": (
+                        "你是严谨的证据型问答助手。基于下面的批次摘要和关键片段，生成一个全面的最终答案。\n"
+                        f"用户问题：{question}\n\n"
+                        "批次摘要：\n"
+                        f"{batch_summary_text}\n\n"
+                        "关键片段列表：\n"
+                        f"{context}\n\n"
+                        "请输出JSON对象，格式为：\n"
+                        '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
+                        "要求：\n"
+                        "1) answer必须是一个全面的、综合所有批次的答案，涵盖所有重要信息；\n"
+                        "2) evidence应包含所有关键segment_id，按时间顺序排列；\n"
+                        "3) 每个evidence条目说明该片段如何支持答案；\n"
+                        "4) 力求完整性和全面性；\n"
+                        "5) 不遗漏任何关键片段。\n"
+                        "仅输出JSON，不要额外文本。"
+                    ),
+                }
+            ]
+            
+            parsed, final_llm_metadata = self._call_llm_json(
+                final_prompt,
+                "最终答案合成",
+            )
+            
+            final_evidence = parsed.get("evidence", []) or []
+            final_answer = parsed.get("answer", "").strip() or "模型未返回有效答案。"
+            
+            if self.logger:
+                self.logger.info(f"最终答案生成成功，包含 {len(final_evidence)} 个引用")
+        except Exception as exc:
+            if self.logger:
+                self.logger.error(f"最终答案合成失败: {exc}")
+            final_answer = "模型在生成最终答案时发生错误。"
+            final_llm_metadata = {"success": False, "error": str(exc)}
+            # 如果最终合成失败，将所有关键段作为 evidence
+            for seg in key_segments:
+                final_evidence.append({
+                    "segment_id": seg.segment_id,
+                    "reason": f"该片段包含相关信息"
+                })
+        
+        return final_answer, final_evidence, {
+            "batch_synthesis": {
+                "total_segments": total_segments,
+                "batch_size": batch_size,
+                "total_batches": total_batches,
+                "batch_summaries": batch_summaries,
+                "batch_llm_calls": all_llm_calls,
+            },
+            "final_synthesis": final_llm_metadata,
+        }
+
     def ask(
         self,
         question: str,
@@ -617,18 +799,27 @@ class VideoKnowledgeQA:
                 self.logger.info(
                     f"准备合成最终回答，使用 {len(useful_segments)} 个有用片段。"
                 )
-            try:
-                parsed, synthesis_llm_metadata = self._call_llm_json(
-                    self._build_synthesis_prompt(question, useful_segments),
-                    "最终答案合成",
-                )
-                final_evidence = parsed.get("evidence", []) or []
-                answer_text = parsed.get("answer", "").strip() or "模型未返回有效答案。"
-            except Exception as exc:
+            
+            # 当有用段数超过 500 时，使用分批合成
+            if len(useful_segments) > 500:
                 if self.logger:
-                    self.logger.error(f"最终答案合成失败: {exc}")
-                answer_text = "模型在生成最终答案时发生错误。"
-                synthesis_llm_metadata = {"success": False, "error": str(exc)}
+                    self.logger.info("有用段数较多，使用分批合成策略")
+                answer_text, final_evidence, synthesis_llm_metadata = self._synthesize_with_batches(
+                    question, useful_segments, batch_size=200
+                )
+            else:
+                try:
+                    parsed, synthesis_llm_metadata = self._call_llm_json(
+                        self._build_synthesis_prompt(question, useful_segments),
+                        "最终答案合成",
+                    )
+                    final_evidence = parsed.get("evidence", []) or []
+                    answer_text = parsed.get("answer", "").strip() or "模型未返回有效答案。"
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.error(f"最终答案合成失败: {exc}")
+                    answer_text = "模型在生成最终答案时发生错误。"
+                    synthesis_llm_metadata = {"success": False, "error": str(exc)}
 
         id_to_seg = {s.segment_id: s for s in useful_segments}
         citations = []
