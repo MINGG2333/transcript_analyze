@@ -118,6 +118,7 @@ class VideoKnowledgeQA:
     ) -> tuple[list[Segment], dict[str, Any]]:
         if self.logger:
             self.logger.info(f"[1/5] 开始从向量索引检索，top_k={vector_top_k}, score_threshold={vector_score_threshold}")
+            self.logger.debug(f"向量索引检索input: {question}")
         vector_ids, vector_scores = self.vector.retrieve(question, top_k=vector_top_k)
         # Filter by score threshold
         vector_filtered = [(sid, score) for sid, score in zip(vector_ids, vector_scores) if score >= vector_score_threshold]
@@ -260,6 +261,8 @@ class VideoKnowledgeQA:
         ]
 
     def _refine_bm25_query(self, question: str) -> tuple[str, dict[str, Any]]:
+        if self.logger:
+            self.logger.debug(f"BM25查询改写input: {question}")
         prompt_messages = self._build_bm25_refinement_prompt(question)
         try:
             parsed, llm_metadata = self._call_llm_json(prompt_messages, "BM25 查询改写")
@@ -572,6 +575,215 @@ class VideoKnowledgeQA:
                 ),
             }
         ]
+
+    def _build_group_query(self, questions: list[dict[str, str]]) -> str:
+        lines: list[str] = []
+        for q in questions:
+            qid = q.get("question_id", "")
+            text = q.get("question_text", "").strip()
+            lines.append(f"[{qid}] {text}")
+        return "请根据受访者（采访者是GUO, An）的话回答以下相关子问题：\n" + "\n".join(lines)
+
+    def _build_interview_group_prompt(
+        self,
+        questions: list[dict[str, str]],
+        segments: list[Segment],
+        live_id: str,
+        meta: dict[str, str],
+    ) -> list[dict[str, str]]:
+        question_lines: list[str] = []
+        for q in questions:
+            qid = q.get("question_id", "")
+            text = q.get("question_text", "").strip()
+            question_lines.append(f"[{qid}] {text}")
+
+        lines: list[str] = []
+        for s in segments:
+            lines.append(self._format_segment_with_local_context(s))
+        context = "\n".join(lines)
+        question_block = "\n".join(question_lines)
+        return [
+            {
+                "role": "user",
+                "content": (
+                    "你是严谨的证据型问答助手。请根据下面给定的片段逐条回答每个子问题，不能臆造。\n"
+                    f"当前访谈 live_id={live_id}，标题={meta.get('video_title', '')}，主播={meta.get('anchor_name', '')}。\n\n"
+                    "问题列表：\n"
+                    f"{question_block}\n\n"
+                    "片段列表（每条含核心片段和局部上下文）：\n"
+                    f"{context}\n\n"
+                    "请输出JSON对象，格式为：\n"
+                    '{"answers":[{"question_id":"...","answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}]}\n'
+                    "要求：\n"
+                    "1) answer必须与该访谈片段内容一致；\n"
+                    "2) evidence仅使用给定片段中的segment_id；\n"
+                    "3) 对于没有足够证据的问题，answer填写空字符串或“无相关证据”，evidence设置为空数组；\n"
+                    "4) 按问题列表顺序输出 answers；\n"
+                    "5) 仅输出JSON，不要额外文本。"
+                ),
+            }
+        ]
+
+    def _normalize_group_answers(
+        self,
+        questions: list[dict[str, str]],
+        answers: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        answers_by_id = {item.get("question_id", ""): item for item in answers if item.get("question_id")}
+        normalized: list[dict[str, Any]] = []
+        for q in questions:
+            qid = q.get("question_id", "")
+            item = answers_by_id.get(qid, {})
+            normalized.append(
+                {
+                    "question_id": qid,
+                    "question_text": q.get("question_text", ""),
+                    "answer": (item.get("answer") or "").strip(),
+                    "evidence": item.get("evidence", []) or [],
+                }
+            )
+        return normalized
+
+    def ask_group(
+        self,
+        questions: list[dict[str, str]],
+        source: str = "",
+        vector_top_k: int = 1000,
+        bm25_top_k: int = 1000,
+        context_window: int = 6,
+        vector_score_threshold: float = 0.332,
+        bm25_score_threshold: float = 15.0,
+        analysis_batch_size: int = 20,
+    ) -> dict[str, Any]:
+        self._ensure_client()
+        group_query = self._build_group_query(questions)
+        if self.logger:
+            self.logger.info(f"开始组问题检索 source={source}，包含 {len(questions)} 个子问题")
+            self.logger.debug(f"构建的组查询: {group_query}")
+        candidates, stats = self.retrieve(
+            group_query,
+            vector_top_k=vector_top_k,
+            bm25_top_k=bm25_top_k,
+            context_window=context_window,
+            vector_score_threshold=vector_score_threshold,
+            bm25_score_threshold=bm25_score_threshold,
+            max_base_segments=None,
+            max_expanded_segments=None,
+        )
+
+        if self.logger:
+            self.logger.info(
+                f"组问题检索完成: candidate_count={stats['candidate_count']}"
+            )
+
+        analysis, useful_segments, analysis_summary, analysis_llm_calls = self._analyze_candidates(
+            group_query, candidates, analysis_batch_size
+        )
+
+        if self.logger:
+            self.logger.info(
+                f"组问题分析完成: useful_segments={analysis_summary['useful_segment_count']}"
+            )
+
+        interview_meta: dict[str, dict[str, str]] = {}
+        for seg in self.store.segments.values():
+            if seg.live_id not in interview_meta:
+                interview_meta[seg.live_id] = {
+                    "live_id": seg.live_id,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "video_datetime": seg.video_datetime,
+                }
+
+        interview_results: list[dict[str, Any]] = []
+        for live_id, meta in sorted(interview_meta.items(), key=lambda x: (x[1]["video_datetime"], x[0])):
+            interview_useful = [seg for seg in useful_segments if seg.live_id == live_id]
+            if not interview_useful:
+                interview_answers = [
+                    {
+                        "question_id": q.get("question_id", ""),
+                        "question_text": q.get("question_text", ""),
+                        "answer": "",
+                        "evidence": [],
+                        "citations": [],
+                    }
+                    for q in questions
+                ]
+            else:
+                try:
+                    parsed, _ = self._call_llm_json(
+                        self._build_interview_group_prompt(questions, interview_useful, live_id, meta),
+                        f"组问题 {source} 访谈 {live_id} 回答",
+                    )
+                    raw_answers = parsed.get("answers", []) or []
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.error(f"访谈 {live_id} 组回答失败: {exc}")
+                    raw_answers = []
+
+                interview_answers = []
+                for item in self._normalize_group_answers(questions, raw_answers):
+                    citations, evidence = self._build_citations_from_evidence(item.get("evidence", []), interview_useful)
+                    interview_answers.append(
+                        {
+                            "question_id": item["question_id"],
+                            "question_text": item["question_text"],
+                            "answer": item["answer"],
+                            "evidence": evidence,
+                            "citations": citations,
+                        }
+                    )
+
+            interview_results.append(
+                {
+                    **meta,
+                    "answers": interview_answers,
+                    "useful_segment_count": len(interview_useful),
+                }
+            )
+
+        result = {
+            "source": source,
+            "questions": questions,
+            "retrieval": stats,
+            "analysis_summary": analysis_summary,
+            "useful_segment_count": len(useful_segments),
+            "interview_results": interview_results,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        archive_data = {
+            **result,
+            "retrieval_segments": [
+                {
+                    "segment_id": seg.segment_id,
+                    "source_label": seg.source_label,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "video_offset": seg.hhmmss,
+                    "absolute_time": seg.absolute_time,
+                    "text": seg.text,
+                }
+                for seg in candidates
+            ],
+            "analysis": analysis,
+            "useful_segments": [
+                {
+                    "segment_id": seg.segment_id,
+                    "source_label": seg.source_label,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "video_offset": seg.hhmmss,
+                    "absolute_time": seg.absolute_time,
+                    "text": seg.text,
+                }
+                for seg in useful_segments
+            ],
+            "llm_calls": {
+                "analysis_batches": analysis_llm_calls,
+            },
+        }
+        result["archive_path"] = str(self._archive(archive_data))
+        return result
 
     def _synthesize_with_batches(
         self,
