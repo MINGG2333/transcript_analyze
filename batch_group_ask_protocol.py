@@ -59,12 +59,13 @@ def main() -> None:
     parser.add_argument("--llm-model", default="deepseek-v4-flash", help="问答LLM模型名")
     parser.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")
     parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY"), help="LLM API key")
-    parser.add_argument("--vector-top-k", type=int, default=10000, help="向量检索top_k")
-    parser.add_argument("--bm25-top-k", type=int, default=10000, help="BM25检索top_k")
+    parser.add_argument("--vector-top-k", type=int, default=1000, help="向量检索top_k")
+    parser.add_argument("--bm25-top-k", type=int, default=1000, help="BM25检索top_k")
     parser.add_argument("--context-window", type=int, default=6, help="上下文扩展窗口")
     parser.add_argument("--analysis-batch-size", type=int, default=100, help="分析批次大小")
     parser.add_argument("--debug", action="store_true", help="启用调试日志")
     parser.add_argument("--limit-groups", type=int, default=0, help="只处理前N个问题组，0为全部")
+    parser.add_argument("--no-skip-existing", action="store_true", help="不跳过已存在的输出目录")
     args = parser.parse_args()
 
     logger = setup_logger(debug=args.debug)
@@ -89,6 +90,10 @@ def main() -> None:
     all_interview_data: dict[str, dict[str, Any]] = {}
     processed_groups = 0
     for source in sorted(groups):
+        source_dir = output_base / safe_name(source)
+        if not args.no_skip_existing and source_dir.exists():
+            logger.info(f"跳过已存在的 source={source}")
+            continue
         if args.limit_groups and processed_groups >= args.limit_groups:
             break
         group_rows = sorted(groups[source], key=lambda r: r.get("question_id", ""))
