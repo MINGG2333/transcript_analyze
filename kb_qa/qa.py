@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import random
+import time
 from typing import Any, Optional
 import uuid
 
@@ -282,52 +283,97 @@ class VideoKnowledgeQA:
                 "response": "",
             }
 
-    def _call_llm_json(self, messages: list[dict[str, str]], description: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        if self.logger:
-            self.logger.info(f"调用LLM: {description}")
-        resp = self.client.chat.completions.create(
-            model=self.llm_model,
-            messages=messages,
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        content = resp.choices[0].message.content or "{}"
+    def _call_llm_json(self, messages: list[dict[str, str]], description: str, max_retries: int = 5) -> tuple[dict[str, Any], dict[str, Any]]:
+        """调用LLM API 并解析JSON响应，包含重试机制（指数退避）。
         
-        # 记录LLM元数据
-        llm_metadata = {
-            "model": self.llm_model,
-            "description": description,
-            "input_tokens": getattr(resp.usage, "prompt_tokens", 0),
-            "output_tokens": getattr(resp.usage, "completion_tokens", 0),
-            "total_tokens": getattr(resp.usage, "total_tokens", 0),
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "prompt": messages[0]["content"] if messages and messages[0].get("role") == "user" else "",
-            "response": content,
-        }
+        Args:
+            messages: 聊天消息列表
+            description: 本次调用的描述
+            max_retries: 最大重试次数，默认5次
+            
+        Returns:
+            (解析后的JSON对象, LLM元数据字典)
+            
+        Raises:
+            RuntimeError: 当所有重试均失败时抛出
+        """
+        last_raw = None
         
-        if self.logger:
-            self.logger.info(f"  tokens: input={llm_metadata['input_tokens']}, output={llm_metadata['output_tokens']}, total={llm_metadata['total_tokens']}")
-        
-        try:
-            parsed = json.loads(content)
-            llm_metadata["success"] = True
-            return parsed, llm_metadata
-        except json.JSONDecodeError:
-            if self.logger:
-                self.logger.warning(f"LLM返回JSON解析失败，尝试提取内容: {description}")
-            start = content.find("{")
-            end = content.rfind("}")
-            if start != -1 and end != -1 and end > start:
+        for attempt in range(max_retries):
+            try:
+                if self.logger:
+                    self.logger.info(f"调用LLM: {description} (尝试 {attempt+1}/{max_retries})")
+                
+                resp = self.client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=messages,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+                content = resp.choices[0].message.content or "{}"
+                last_raw = content  # 保存原始内容
+                
+                # 记录LLM元数据
+                llm_metadata = {
+                    "model": self.llm_model,
+                    "description": description,
+                    "input_tokens": getattr(resp.usage, "prompt_tokens", 0),
+                    "output_tokens": getattr(resp.usage, "completion_tokens", 0),
+                    "total_tokens": getattr(resp.usage, "total_tokens", 0),
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "prompt": messages[0]["content"] if messages and messages[0].get("role") == "user" else "",
+                    "response": content,
+                }
+                
+                if self.logger:
+                    self.logger.info(f"  tokens: input={llm_metadata['input_tokens']}, output={llm_metadata['output_tokens']}, total={llm_metadata['total_tokens']}")
+                
                 try:
-                    parsed = json.loads(content[start : end + 1])
+                    parsed = json.loads(content)
                     llm_metadata["success"] = True
-                    llm_metadata["note"] = "通过字符串提取成功解析"
                     return parsed, llm_metadata
                 except json.JSONDecodeError:
-                    pass
-            llm_metadata["success"] = False
-            llm_metadata["error"] = f"无法将LLM响应解析为JSON: {content}"
-            raise RuntimeError(llm_metadata["error"])
+                    if self.logger:
+                        self.logger.warning(f"LLM返回JSON解析失败，尝试提取内容: {description}")
+                    start = content.find("{")
+                    end = content.rfind("}")
+                    if start != -1 and end != -1 and end > start:
+                        try:
+                            parsed = json.loads(content[start : end + 1])
+                            llm_metadata["success"] = True
+                            llm_metadata["note"] = "通过字符串提取成功解析"
+                            return parsed, llm_metadata
+                        except json.JSONDecodeError:
+                            pass
+                    # JSON解析失败，如果还有重试机会则继续，否则抛出异常
+                    if attempt < max_retries - 1:
+                        wait_time = 5 ** attempt
+                        if self.logger:
+                            self.logger.warning(f"JSON解析失败 (第 {attempt+1} 次)，等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        llm_metadata["success"] = False
+                        llm_metadata["error"] = f"无法将LLM响应解析为JSON: {content}"
+                        raise RuntimeError(llm_metadata["error"])
+                        
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"LLM请求异常 (第 {attempt+1} 次): {e}")
+                
+                # 如果还有重试机会则继续
+                if attempt < max_retries - 1:
+                    wait_time = 5 ** attempt
+                    if self.logger:
+                        self.logger.warning(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # 所有重试均失败
+                    error_msg = f"LLM调用在 {max_retries} 次重试后仍失败"
+                    if self.logger:
+                        self.logger.error(error_msg)
+                    raise RuntimeError(error_msg) from e
 
     def _build_analysis_prompt(
         self,
