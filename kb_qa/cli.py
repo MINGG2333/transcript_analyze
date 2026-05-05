@@ -92,7 +92,6 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--bm25-score-threshold", type=float, default=11.0, help="BM25检索相关性阈值")
     ask.add_argument("--context-window", type=int, default=10, help="上下文扩展窗口大小")
     ask.add_argument("--analysis-batch-size", type=int, default=100, help="逐批分析候选片段时每批的最大数量")
-    ask.add_argument("--min-interviews", type=int, default=1, help="每个问题至少来自不同访谈的最小数量")
     return p
 
 
@@ -127,7 +126,6 @@ def main() -> None:
             vector_score_threshold=args.vector_score_threshold,
             bm25_score_threshold=args.bm25_score_threshold,
             analysis_batch_size=args.analysis_batch_size,
-            min_interviews=args.min_interviews,
         )
         logger.success(f"ask命令执行完成，归档文件: {out.get('archive_path', 'N/A')}")
         return

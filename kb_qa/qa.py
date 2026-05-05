@@ -115,7 +115,6 @@ class VideoKnowledgeQA:
         bm25_score_threshold: float = 15.0,
         max_base_segments: Optional[int] = None,
         max_expanded_segments: Optional[int] = None,
-        min_interviews: int = 1,
     ) -> tuple[list[Segment], dict[str, Any]]:
         if self.logger:
             self.logger.info(f"[1/5] 开始从向量索引检索，top_k={vector_top_k}, score_threshold={vector_score_threshold}")
@@ -193,7 +192,7 @@ class VideoKnowledgeQA:
 
         if self.logger:
             self.logger.info(f"[5/5] 开始上下文扩展，context_window={context_window}")
-        candidates = self.store.expand_context_with_diversity(merged_ids, context_window=context_window, min_interviews=min_interviews, logger=self.logger)
+        candidates = self.store.expand_context(merged_ids, context_window=context_window, logger=self.logger)
         if self.logger:
             self.logger.info(f"[5/5] 上下文扩展完成，得到 {len(candidates)} 个扩展后的片段")
 
@@ -709,6 +708,67 @@ class VideoKnowledgeQA:
             "final_synthesis": final_llm_metadata,
         }
 
+    def _build_citations_from_evidence(
+        self,
+        evidence: list[dict[str, Any]],
+        useful_segments: list[Segment],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        id_to_seg = {s.segment_id: s for s in useful_segments}
+        normalized_evidence = list(evidence)
+        citations: list[dict[str, Any]] = []
+
+        for idx, item in enumerate(normalized_evidence, start=1):
+            sid = item.get("segment_id")
+            seg = id_to_seg.get(sid)
+            if not seg:
+                continue
+            citations.append(
+                {
+                    "citation_id": f"#{idx}",
+                    "segment_id": sid,
+                    "source_type": seg.source_label,
+                    "quoted_text": seg.text,
+                    "video_offset": seg.hhmmss,
+                    "absolute_time": seg.absolute_time,
+                    "source_file": seg.file_path,
+                    "video_path": seg.video_path,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "live_id": seg.live_id,
+                    "reason": item.get("reason", ""),
+                }
+            )
+
+        cited_segment_ids = {item.get("segment_id") for item in normalized_evidence if item.get("segment_id")}
+        missing_segments = [seg for seg in useful_segments if seg.segment_id not in cited_segment_ids]
+        if missing_segments and self.logger:
+            self.logger.warning(f"LLM 遗漏了 {len(missing_segments)} 个有用段，将自动添加到 evidence")
+        for seg in missing_segments:
+            reason = f"该片段包含与问题相关的有用信息：{seg.text[:100]}..."
+            normalized_evidence.append(
+                {
+                    "segment_id": seg.segment_id,
+                    "reason": reason,
+                }
+            )
+            citations.append(
+                {
+                    "citation_id": f"#{len(citations) + 1}",
+                    "segment_id": seg.segment_id,
+                    "source_type": seg.source_label,
+                    "quoted_text": seg.text,
+                    "video_offset": seg.hhmmss,
+                    "absolute_time": seg.absolute_time,
+                    "source_file": seg.file_path,
+                    "video_path": seg.video_path,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "live_id": seg.live_id,
+                    "reason": reason,
+                }
+            )
+        return citations, normalized_evidence
+
     def ask(
         self,
         question: str,
@@ -718,7 +778,6 @@ class VideoKnowledgeQA:
         vector_score_threshold: float = 0.3,
         bm25_score_threshold: float = 15.0,
         analysis_batch_size: int = 20,
-        min_interviews: int = 1,
     ) -> dict[str, Any]:
         self._ensure_client()
         if self.logger:
@@ -734,7 +793,6 @@ class VideoKnowledgeQA:
             bm25_score_threshold=bm25_score_threshold,
             max_base_segments=None,  # 不限制基础段数
             max_expanded_segments=None,  # 不限制扩展段数
-            min_interviews=min_interviews,
         )
         if self.logger:
             self.logger.info(
@@ -820,62 +878,70 @@ class VideoKnowledgeQA:
                     answer_text = "模型在生成最终答案时发生错误。"
                     synthesis_llm_metadata = {"success": False, "error": str(exc)}
 
-        id_to_seg = {s.segment_id: s for s in useful_segments}
-        citations = []
-        for idx, item in enumerate(final_evidence, start=1):
-            sid = item.get("segment_id")
-            seg = id_to_seg.get(sid)
-            if not seg:
-                continue
-            citations.append(
-                {
-                    "citation_id": f"#{idx}",
-                    "segment_id": sid,
-                    "source_type": seg.source_label,
-                    "quoted_text": seg.text,
-                    "video_offset": seg.hhmmss,
-                    "absolute_time": seg.absolute_time,
-                    "source_file": seg.file_path,
-                    "video_path": seg.video_path,
-                    "video_title": seg.video_title,
-                    "anchor_name": seg.anchor_name,
-                    "live_id": seg.live_id,
-                    "reason": item.get("reason", ""),
-                }
-            )
-
-        # 确保所有有用段都被引用，如果 LLM 遗漏了某些段
-        cited_segment_ids = {item.get("segment_id") for item in final_evidence if item.get("segment_id")}
-        missing_segments = [seg for seg in useful_segments if seg.segment_id not in cited_segment_ids]
-
-        if missing_segments:
-            if self.logger:
-                self.logger.warning(f"LLM 遗漏了 {len(missing_segments)} 个有用段，将自动添加到 evidence")
-            for seg in missing_segments:
-                final_evidence.append({
-                    "segment_id": seg.segment_id,
-                    "reason": f"该片段包含与问题相关的有用信息：{seg.text[:100]}..."
-                })
-                citations.append(
-                    {
-                        "citation_id": f"#{len(citations) + 1}",
-                        "segment_id": seg.segment_id,
-                        "source_type": seg.source_label,
-                        "quoted_text": seg.text,
-                        "video_offset": seg.hhmmss,
-                        "absolute_time": seg.absolute_time,
-                        "source_file": seg.file_path,
-                        "video_path": seg.video_path,
-                        "video_title": seg.video_title,
-                        "anchor_name": seg.anchor_name,
-                        "live_id": seg.live_id,
-                        "reason": f"该片段包含与问题相关的有用信息：{seg.text[:100]}...",
-                    }
-                )
+        citations, final_evidence = self._build_citations_from_evidence(final_evidence, useful_segments)
 
         if citations and "[#" not in answer_text:
             refs = " ".join(f"[#{i}]" for i in range(1, len(citations) + 1))
             answer_text = f"{answer_text} 参考引用：{refs}"
+
+        useful_by_interview: dict[str, list[Segment]] = {}
+        for seg in useful_segments:
+            useful_by_interview.setdefault(seg.live_id, []).append(seg)
+
+        interview_meta: dict[str, dict[str, str]] = {}
+        for seg in self.store.segments.values():
+            if seg.live_id not in interview_meta:
+                interview_meta[seg.live_id] = {
+                    "live_id": seg.live_id,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "video_datetime": seg.video_datetime,
+                }
+        interview_results: list[dict[str, Any]] = []
+        for live_id, meta in sorted(interview_meta.items(), key=lambda x: (x[1]["video_datetime"], x[0])):
+            interview_useful = useful_by_interview.get(live_id, [])
+            if not interview_useful:
+                interview_results.append(
+                    {
+                        **meta,
+                        "answer": "",
+                        "citations": [],
+                        "useful_segment_count": 0,
+                    }
+                )
+                continue
+            interview_answer = ""
+            interview_evidence: list[dict[str, Any]] = []
+            if len(interview_useful) > 500:
+                interview_answer, interview_evidence, _ = self._synthesize_with_batches(
+                    question, interview_useful, batch_size=200
+                )
+            else:
+                try:
+                    parsed, _ = self._call_llm_json(
+                        self._build_synthesis_prompt(question, interview_useful),
+                        f"访谈 {live_id} 答案合成",
+                    )
+                    interview_evidence = parsed.get("evidence", []) or []
+                    interview_answer = parsed.get("answer", "").strip() or ""
+                except Exception:
+                    interview_answer = ""
+                    interview_evidence = []
+            interview_citations, interview_evidence = self._build_citations_from_evidence(
+                interview_evidence,
+                interview_useful,
+            )
+            if interview_citations and "[#" not in interview_answer:
+                refs = " ".join(f"[#{i}]" for i in range(1, len(interview_citations) + 1))
+                interview_answer = f"{interview_answer} 参考引用：{refs}".strip()
+            interview_results.append(
+                {
+                    **meta,
+                    "answer": interview_answer,
+                    "citations": interview_citations,
+                    "useful_segment_count": len(interview_useful),
+                }
+            )
 
         result = {
             "question": question,
@@ -885,6 +951,7 @@ class VideoKnowledgeQA:
             "retrieval": stats,
             "analysis_summary": analysis_summary,
             "useful_segment_count": len(useful_segments),
+            "interview_results": interview_results,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         archive_data = {
