@@ -358,6 +358,50 @@ class VideoKnowledgeQA:
             }
         ]
 
+    def _format_segment_with_local_context(
+        self,
+        segment: Segment,
+        context_window: int = 2,
+    ) -> str:
+        """格式化单个片段及其局部上下文，供合成阶段使用。"""
+        key = f"{segment.live_id}::{segment.source_type}"
+        seq = self.store.by_live_source.get(key, [])
+        if not seq:
+            return (
+                f"[{segment.segment_id}] 类型={segment.source_label}; 直播时间={segment.video_datetime}; "
+                f"视频内时间={segment.hhmmss}; 标题={segment.video_title}; 用户名={segment.anchor_name};\n"
+                f"核心片段内容：{segment.text}"
+            )
+
+        try:
+            pos = seq.index(segment.segment_id)
+        except ValueError:
+            return (
+                f"[{segment.segment_id}] 类型={segment.source_label}; 直播时间={segment.video_datetime}; "
+                f"视频内时间={segment.hhmmss}; 标题={segment.video_title}; 用户名={segment.anchor_name};\n"
+                f"核心片段内容：{segment.text}"
+            )
+
+        start = max(0, pos - context_window)
+        end = min(len(seq), pos + context_window + 1)
+        local_lines: list[str] = []
+        for idx in range(start, end):
+            sid = seq[idx]
+            local_seg = self.store.segments.get(sid)
+            if not local_seg:
+                continue
+            marker = "核心片段" if sid == segment.segment_id else "上下文片段"
+            local_lines.append(
+                f"  - [{marker}] ({local_seg.hhmmss}) {local_seg.text}"
+            )
+
+        local_context = "\n".join(local_lines)
+        return (
+            f"[{segment.segment_id}] 类型={segment.source_label}; 直播时间={segment.video_datetime}; "
+            f"视频内时间={segment.hhmmss}; 标题={segment.video_title}; 用户名={segment.anchor_name};\n"
+            f"局部上下文（同一访谈同一来源，窗口={context_window}）：\n{local_context}"
+        )
+
     def _analyze_candidates(
         self,
         question: str,
@@ -466,18 +510,15 @@ class VideoKnowledgeQA:
     def _build_synthesis_prompt(self, question: str, useful_segments: list[Segment]) -> list[dict[str, str]]:
         lines: list[str] = []
         for s in useful_segments:
-            lines.append(
-                f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
-            )
+            lines.append(self._format_segment_with_local_context(s))
         context = "\n".join(lines)
         return [
             {
                 "role": "user",
                 "content": (
-                    "你是严谨的证据型问答助手。请只使用下面列出的有用片段回答问题，不能臆造。\n"
+                    "你是严谨的证据型问答助手。请只使用下面列出的有用片段及其局部上下文回答问题，不能臆造。\n"
                     f"用户问题：{question}\n\n"
-                    "片段列表：\n"
+                    "片段列表（每条含核心片段和局部上下文）：\n"
                     f"{context}\n\n"
                     "请输出JSON对象，格式为：\n"
                     '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
@@ -497,19 +538,16 @@ class VideoKnowledgeQA:
     ) -> list[dict[str, str]]:
         lines: list[str] = []
         for s in segments:
-            lines.append(
-                f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
-            )
+            lines.append(self._format_segment_with_local_context(s))
         context = "\n".join(lines)
         return [
             {
                 "role": "user",
                 "content": (
-                    "你是严谨的证据型问答助手。请根据下面的片段总结与问题相关的关键信息。\n"
+                    "你是严谨的证据型问答助手。请根据下面的片段及其局部上下文总结与问题相关的关键信息。\n"
                     f"用户问题：{question}\n"
                     f"这是第 {batch_index}/{total_batches} 批片段。\n\n"
-                    "片段列表：\n"
+                    "片段列表（每条含核心片段和局部上下文）：\n"
                     f"{context}\n\n"
                     "请输出JSON对象，格式为：\n"
                     '{"summary":"...","key_segments":[{"segment_id":"...","reason":"..."}]}\n'
@@ -612,10 +650,7 @@ class VideoKnowledgeQA:
             
             lines: list[str] = []
             for s in key_segments:
-                lines.append(
-                    f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                    f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
-                )
+                lines.append(self._format_segment_with_local_context(s))
             context = "\n".join(lines)
             
             final_prompt = [
@@ -626,7 +661,7 @@ class VideoKnowledgeQA:
                         f"用户问题：{question}\n\n"
                         "批次摘要：\n"
                         f"{batch_summary_text}\n\n"
-                        "关键片段列表：\n"
+                        "关键片段列表（每条含核心片段和局部上下文）：\n"
                         f"{context}\n\n"
                         "请输出JSON对象，格式为：\n"
                         '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
