@@ -85,8 +85,21 @@ class SegmentStore:
         
         if logger:
             logger.info(f"  扩展统计: 基础段数={len(segment_ids)}, 扩展后总段数={len(result)}, 新增段数={expansion_count}")
-        
-        return sorted(result.values(), key=lambda s: s.start_time)
+
+        ordered = sorted(
+            result.values(),
+            key=lambda s: ((s.video_title or s.live_id), s.live_id, s.start_time),
+        )
+        if logger:
+            logger.debug("  扩展后片段排序前30:")
+            for idx, seg in enumerate(ordered[:30], start=1):
+                text_preview = seg.text.replace("\n", " ")[:60]
+                logger.debug(
+                    f"    {idx:02d}. video_title={seg.video_title!r}, live_id={seg.live_id}, source={seg.source_type}, "
+                    f"start={seg.start_time:.3f}, hhmmss={seg.hhmmss}, id={seg.segment_id}, text={text_preview!r}"
+                )
+
+        return ordered
 
 class VectorIndex:
     def __init__(self, db_dir: Path, embedding_model: str):
