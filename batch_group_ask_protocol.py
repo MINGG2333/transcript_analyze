@@ -59,8 +59,8 @@ def main() -> None:
     parser.add_argument("--llm-model", default="deepseek-v4-flash", help="问答LLM模型名")
     parser.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")
     parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY"), help="LLM API key")
-    parser.add_argument("--vector-top-k", type=int, default=1000, help="向量检索top_k")
-    parser.add_argument("--bm25-top-k", type=int, default=1000, help="BM25检索top_k")
+    parser.add_argument("--vector-top-k", type=int, default=600, help="向量检索top_k")
+    parser.add_argument("--bm25-top-k", type=int, default=600, help="BM25检索top_k")
     parser.add_argument("--context-window", type=int, default=6, help="上下文扩展窗口")
     parser.add_argument("--analysis-batch-size", type=int, default=100, help="分析批次大小")
     parser.add_argument("--debug", action="store_true", help="启用调试日志")
@@ -135,54 +135,68 @@ def main() -> None:
 
         processed_groups += 1
 
-    # 为每个访谈生成统一CSV和问题级引用JSON
-    for live_id, interview_info in sorted(all_interview_data.items(), key=lambda x: x[1].get("video_datetime", "")):
-        video_title = interview_info.get("video_title", "")
-        interview_name = safe_name(f"{live_id}-{video_title}")
-        interview_csv_path = output_base / f"{interview_name}.csv"
-        interview_rows = []
+        # 每处理完一个source，就更新所有访谈的CSV
+        for live_id, interview_info in sorted(all_interview_data.items(), key=lambda x: x[1].get("video_datetime", "")):
+            video_title = interview_info.get("video_title", "")
+            interview_name = safe_name(f"{live_id}-{video_title}")
+            interview_csv_path = output_base / f"{interview_name}.csv"
+            interview_rows = []
 
-        for source in sorted(interview_info["answers"].keys()):
-            for answer_item in interview_info["answers"][source]:
-                qid = answer_item.get("question_id", "")
-                answer_text = answer_item.get("answer", "")
-                citations = answer_item.get("citations", []) or []
-                citation_json_path = ""
+            for src in sorted(interview_info["answers"].keys()):
+                for answer_item in interview_info["answers"][src]:
+                    qid = answer_item.get("question_id", "")
+                    answer_text = answer_item.get("answer", "")
+                    citations = answer_item.get("citations", []) or []
+                    citation_json_path = ""
 
+                    if qid:
+                        source_dir = output_base / safe_name(src)
+                        question_dir = source_dir / qid
+                        question_dir.mkdir(parents=True, exist_ok=True)
+                        citation_file = question_dir / f"{interview_name}.json"
+
+                        citation_payload = {
+                            "live_id": live_id,
+                            "video_title": video_title,
+                            "anchor_name": interview_info.get("anchor_name", ""),
+                            "video_datetime": interview_info.get("video_datetime", ""),
+                            "source": src,
+                            "question_id": qid,
+                            "question_text": answer_item.get("question_text", ""),
+                            "answer": answer_text,
+                            "evidence": answer_item.get("evidence", []) or [],
+                            "citations": citations,
+                            "useful_segment_count": len(citations),
+                        }
+                        citation_file.write_text(json.dumps(citation_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                        citation_json_path = os.path.relpath(citation_file, Path.cwd())
+
+                    interview_rows.append(
+                        {
+                            "question_id": qid,
+                            "question_text": answer_item.get("question_text", ""),
+                            "source": src,
+                            "answer": answer_text,
+                            "citation_path": citation_json_path,
+                        }
+                    )
+
+            # 合并现有数据
+            merged_dict = {}
+            if interview_csv_path.exists():
+                existing_rows, _ = load_questions(interview_csv_path)
+                for row in existing_rows:
+                    qid = row.get("question_id", "")
+                    if qid:
+                        merged_dict[qid] = row
+            for row in interview_rows:
+                qid = row.get("question_id", "")
                 if qid:
-                    source_dir = output_base / safe_name(source)
-                    question_dir = source_dir / qid
-                    question_dir.mkdir(parents=True, exist_ok=True)
-                    citation_file = question_dir / f"{interview_name}.json"
+                    merged_dict[qid] = row  # 更新或添加
 
-                    citation_payload = {
-                        "live_id": live_id,
-                        "video_title": video_title,
-                        "anchor_name": interview_info.get("anchor_name", ""),
-                        "video_datetime": interview_info.get("video_datetime", ""),
-                        "source": source,
-                        "question_id": qid,
-                        "question_text": answer_item.get("question_text", ""),
-                        "answer": answer_text,
-                        "evidence": answer_item.get("evidence", []) or [],
-                        "citations": citations,
-                        "useful_segment_count": len(citations),
-                    }
-                    citation_file.write_text(json.dumps(citation_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-                    citation_json_path = os.path.relpath(citation_file, Path.cwd())
-
-                interview_rows.append(
-                    {
-                        "question_id": qid,
-                        "question_text": answer_item.get("question_text", ""),
-                        "source": source,
-                        "answer": answer_text,
-                        "citation_path": citation_json_path,
-                    }
-                )
-
-        write_csv(interview_csv_path, interview_rows, fieldnames)
-        logger.info(f"已生成访谈CSV: {interview_csv_path}")
+            final_rows = list(merged_dict.values())
+            write_csv(interview_csv_path, final_rows, fieldnames)
+            logger.info(f"已更新访谈CSV: {interview_csv_path}")
 
     logger.success(f"批量组问答完成，结果输出到 {output_base}")
 
