@@ -507,6 +507,10 @@ class VideoKnowledgeQA:
                 })
 
             useful_items = parsed.get("useful", []) or []
+            if not isinstance(useful_items, list):
+                useful_items = []
+            else:
+                useful_items = [item for item in useful_items if isinstance(item, dict) and "segment_id" in item]
             useful_batch_ids = {item.get("segment_id") for item in useful_items if item.get("segment_id")}
             useful_count = 0
             for seg in batch:
