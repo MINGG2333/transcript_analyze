@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,68 @@ def build_qa(args: argparse.Namespace, logger: Any) -> VideoKnowledgeQA:
     )
 
 
+def _expected_csv_stem(live_id: str, video_title: str) -> str:
+    """构造期望的 CSV 文件名（不含扩展名），与 write_csv 中的命名逻辑保持一致。
+    
+    CSV 命名格式为: safe_name(f"{live_id}-{video_title}") + ".csv"
+    """
+    return safe_name(f"{live_id}-{video_title}")
+
+
+def _stem_to_live_id(stem: str, records: dict) -> str | None:
+    """从 csv 文件名的 stem（不含扩展名）反向匹配出 live_id。
+    
+    遍历所有 records 的 live_id，构造其期望的 CSV 文件名，与实际的 stem 做精确比对。
+    优先尝试 records 中的 "video_title" 字段，若不存在则使用 "title" 字段。
+    """
+    for lid, info in records.items():
+        for title_field in ("video_title", "title", "video_name"):
+            vt = info.get(title_field, "")
+            if not vt:
+                continue
+            expected = _expected_csv_stem(lid, vt)
+            if stem == expected:
+                return lid
+    return None
+
+
+def get_existing_interviews(res_dir: Path, records_path: Path) -> set[str]:
+    """通过构造每个 live_id 的预期 CSV 文件名，与 res 目录下实际 CSV 文件做精确比对，
+    找出已处理的访谈 ID。
+
+    使用 records 中的 "video_title"/"title" 字段构造完整文件名，
+    避免了前缀碰撞问题（如 访谈16 与 访谈16-15 是不同的访谈）。
+    """
+    existing = set()
+    if not res_dir.exists() or not records_path.exists():
+        return existing
+    
+    with open(records_path, 'r', encoding='utf-8') as f:
+        records = json.load(f)
+    
+    csv_names = {csv_path.name for csv_path in res_dir.glob("*.csv")}
+    
+    for live_id, info in records.items():
+        vt = info.get("video_title") or info.get("title") or ""
+        if not vt:
+            continue
+        expected_filename = _expected_csv_stem(live_id, vt) + ".csv"
+        if expected_filename in csv_names:
+            existing.add(live_id)
+    
+    return existing
+
+
+def get_new_interviews(records_path: Path, existing_interviews: set[str]) -> list[str]:
+    """从 interview_records.json 找出新增访谈（不在已有 CSV 中的）"""
+    if not records_path.exists():
+        return []
+    with open(records_path, 'r', encoding='utf-8') as f:
+        records = json.load(f)
+    new_ids = [lid for lid in records if lid not in existing_interviews]
+    return new_ids
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="按问题组批量执行问答，为每个访谈生成统一CSV和问题级别的引用JSON")
     parser.add_argument("--input-csv", default="interview_protocol_CN.csv", help="原始问题CSV文件")
@@ -66,6 +129,7 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="启用调试日志")
     parser.add_argument("--limit-groups", type=int, default=0, help="只处理前N个问题组，0为全部")
     parser.add_argument("--no-skip-existing", action="store_true", help="不跳过已存在的输出目录")
+    parser.add_argument("--incremental", action="store_true", help="增量模式：只处理新增访谈，避免重复LLM调用")
     args = parser.parse_args()
 
     logger = setup_logger(debug=args.debug)
@@ -86,12 +150,60 @@ def main() -> None:
 
     output_base.mkdir(parents=True, exist_ok=True)
 
+    # 增量模式：检测新增访谈
+    new_interview_ids: list[str] = []
+    if args.incremental:
+        records_path = Path(args.records)
+        existing_interviews = get_existing_interviews(output_base, records_path)
+        new_interview_ids = get_new_interviews(records_path, existing_interviews)
+        if not new_interview_ids:
+            logger.info("增量模式：未检测到新访谈，无需处理。")
+            return
+        logger.info(f"增量模式：检测到 {len(new_interview_ids)} 个新增访谈: {new_interview_ids}")
+        logger.info(f"将只对这些新访谈执行问答（跳过已有 {len(existing_interviews)} 个访谈）")
+
     # 累积所有访谈的结果：live_id -> {source -> answers...}
     all_interview_data: dict[str, dict[str, Any]] = {}
+    # 增量模式下，加载已有 CSV 的回答用于在 codebook 中提供完整数据
+    if args.incremental:
+        records_for_reverse = json.loads(Path(args.records).read_text('utf-8')) if Path(args.records).exists() else {}
+        for csv_path in output_base.glob("*.csv"):
+            try:
+                interview_rows, _ = load_questions(csv_path)
+                if not interview_rows:
+                    continue
+                stem = csv_path.stem
+                live_id = _stem_to_live_id(stem, records_for_reverse)
+                if not live_id:
+                    continue
+                vt = ""
+                if live_id in records_for_reverse:
+                    vt = records_for_reverse[live_id].get("video_title") or records_for_reverse[live_id].get("title") or ""
+                all_interview_data[live_id] = {
+                    "live_id": live_id,
+                    "video_title": vt,
+                    "anchor_name": "",
+                    "video_datetime": "",
+                    "answers": {},
+                }
+                for row in interview_rows:
+                    src = row.get("source", "")
+                    qid = row.get("question_id", "")
+                    if src not in all_interview_data[live_id]["answers"]:
+                        all_interview_data[live_id]["answers"][src] = []
+                    all_interview_data[live_id]["answers"][src].append({
+                        "question_id": qid,
+                        "question_text": row.get("question_text", ""),
+                        "answer": row.get("answer", ""),
+                        "citations": [],
+                    })
+            except Exception as e:
+                logger.warning(f"加载已有CSV失败: {csv_path}: {e}")
+
     processed_groups = 0
     for source in sorted(groups):
         source_dir = output_base / safe_name(source)
-        if not args.no_skip_existing and source_dir.exists():
+        if not args.no_skip_existing and source_dir.exists() and not args.incremental:
             logger.info(f"跳过已存在的 source={source}")
             continue
         if args.limit_groups and processed_groups >= args.limit_groups:
@@ -110,6 +222,9 @@ def main() -> None:
             for row in group_rows
         ]
 
+        # 增量模式：指定只处理新增访谈
+        interview_ids = new_interview_ids if args.incremental and new_interview_ids else None
+
         result = qa.ask_group(
             questions=questions,
             source=source,
@@ -119,6 +234,7 @@ def main() -> None:
             vector_score_threshold=0.332,
             bm25_score_threshold=15.0,
             analysis_batch_size=args.analysis_batch_size,
+            interview_ids=interview_ids,
         )
 
         for interview in result["interview_results"]:
@@ -135,8 +251,11 @@ def main() -> None:
 
         processed_groups += 1
 
-        # 每处理完一个source，就更新所有访谈的CSV
+        # 每处理完一个source，就更新CSV（增量模式下只更新新增访谈）
         for live_id, interview_info in sorted(all_interview_data.items(), key=lambda x: x[1].get("video_datetime", "")):
+            # 增量模式下跳过已有访谈，只写入新增访谈的CSV/JSON
+            if args.incremental and live_id not in new_interview_ids:
+                continue
             video_title = interview_info.get("video_title", "")
             interview_name = safe_name(f"{live_id}-{video_title}")
             interview_csv_path = output_base / f"{interview_name}.csv"

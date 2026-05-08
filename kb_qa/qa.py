@@ -548,7 +548,7 @@ class VideoKnowledgeQA:
             )
             if self.logger:
                 self.logger.info(
-                    f"批次 {batch_index + 1} 分析完成: useful={useful_count} / {len(batch)}"
+                    f"批次 {batch_index} 分析完成: useful={useful_count} / {len(batch)}"
                 )
 
         summary = {
@@ -704,6 +704,7 @@ class VideoKnowledgeQA:
         vector_score_threshold: float = 0.332,
         bm25_score_threshold: float = 15.0,
         analysis_batch_size: int = 20,
+        interview_ids: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         self._ensure_client()
         group_query = self._build_group_query(questions)
@@ -726,9 +727,35 @@ class VideoKnowledgeQA:
                 f"组问题检索完成: candidate_count={stats['candidate_count']}"
             )
 
-        analysis, useful_segments, analysis_summary, analysis_llm_calls = self._analyze_candidates(
-            group_query, candidates, analysis_batch_size
-        )
+        # 如果指定了 interview_ids，仅保留这些访谈的候选片段进行分析（减少LLM调用）
+        if interview_ids is not None:
+            old_count = len(candidates)
+            candidates = [seg for seg in candidates if seg.live_id in interview_ids]
+            if self.logger:
+                self.logger.info(
+                    f"增量模式：候选段从 {old_count} 过滤至 {len(candidates)} 个（仅保留 {len(interview_ids)} 个新增访谈的片段）"
+                )
+            if not candidates:
+                if self.logger:
+                    self.logger.warning("增量模式：新增访谈未检索到任何候选段，跳过分析")
+                analysis = []
+                useful_segments = []
+                analysis_summary = {
+                    "total_candidates": 0,
+                    "useful_segment_count": 0,
+                    "analysis_batches": [],
+                    "analysis_batch_size": analysis_batch_size,
+                }
+                analysis_llm_calls = []
+                stats["note"] = "增量模式：无新增访谈的候选段"
+            else:
+                analysis, useful_segments, analysis_summary, analysis_llm_calls = self._analyze_candidates(
+                    group_query, candidates, analysis_batch_size
+                )
+        else:
+            analysis, useful_segments, analysis_summary, analysis_llm_calls = self._analyze_candidates(
+                group_query, candidates, analysis_batch_size
+            )
 
         if self.logger:
             self.logger.info(
@@ -744,6 +771,17 @@ class VideoKnowledgeQA:
                     "anchor_name": seg.anchor_name,
                     "video_datetime": seg.video_datetime,
                 }
+
+        # 如果指定了 interview_ids，只处理这些访谈
+        if interview_ids is not None:
+            interview_meta = {
+                lid: meta for lid, meta in interview_meta.items()
+                if lid in interview_ids
+            }
+            if self.logger:
+                self.logger.info(
+                    f"增量模式：只处理 {len(interview_meta)} 个指定的访谈: {interview_ids}"
+                )
 
         interview_results: list[dict[str, Any]] = []
         for live_id, meta in sorted(interview_meta.items(), key=lambda x: (x[1]["video_datetime"], x[0])):
@@ -1310,4 +1348,3 @@ class VideoKnowledgeQA:
             self.client = OpenAI(api_key=self.api_key, base_url=self.api_base) if self.api_base else OpenAI(api_key=self.api_key)
         else:
             self.client = OpenAI(base_url=self.api_base) if self.api_base else OpenAI()
-

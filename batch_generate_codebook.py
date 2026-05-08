@@ -595,7 +595,8 @@ def main():
     parser.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")
     parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY"), help="LLM API key")
     parser.add_argument("--max-questions", type=int, default=0, help="最多处理的问题数，0为全部")
-    parser.add_argument("--skip-existing", action="store_true", help="跳过已存在 codebook 条目的问题")
+    parser.add_argument("--skip-existing", action="store_true", help="跳过已存在 codebook 条目的问题（全量模式）")
+    parser.add_argument("--incremental", action="store_true", help="增量模式：只重新分析有新访谈回答加入的问题（避免完全重跑）")
     parser.add_argument("--debug", action="store_true", help="启用调试日志")
     args = parser.parse_args()
 
@@ -617,14 +618,36 @@ def main():
     # Check existing output
     json_output_path = output_dir / "codebook.json"
     existing_entries: dict[str, dict[str, Any]] = {}
-    if args.skip_existing and json_output_path.exists():
+    if (args.skip_existing or args.incremental) and json_output_path.exists():
         try:
             existing_data = json.loads(json_output_path.read_text(encoding="utf-8"))
             for entry in existing_data:
                 existing_entries[entry["question_id"]] = entry
             logger.info(f"已加载 {len(existing_entries)} 个现有 codebook 条目")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"加载现有codebook失败，将重新处理全部: {e}")
+
+    # Determine which questions need processing (incremental mode)
+    questions_to_process: set[str] = set()
+    if args.incremental:
+        # Compare answer count vs existing codebook entries
+        for qid in ordered_qids:
+            current_answer_count = len(answers_by_q.get(qid, {}))
+            existing_entry = existing_entries.get(qid)
+            if existing_entry is None:
+                # New question, needs processing
+                questions_to_process.add(qid)
+            else:
+                existing_answer_count = len(existing_entry.get("interview_answers", {}))
+                if current_answer_count > existing_answer_count:
+                    questions_to_process.add(qid)
+        logger.info(f"增量模式：{len(questions_to_process)} 个问题有新回答需要重新分析")
+    elif args.skip_existing:
+        # In skip-existing mode, all questions not in existing_entries need processing
+        questions_to_process = set(qid for qid in ordered_qids if qid not in existing_entries)
+    else:
+        # Full mode: process all questions
+        questions_to_process = set(ordered_qids)
 
     # Initialize LLM client
     if not args.api_key:
@@ -641,17 +664,17 @@ def main():
     per_question_dir = output_dir / "per_question"
     per_question_dir.mkdir(parents=True, exist_ok=True)
 
+    # Start with existing entries (all of them)
     entries = list(existing_entries.values())
     total_tokens = 0
     processed_count = 0
     skipped_count = 0
 
-    logger.info(f"开始处理 {len(ordered_qids)} 个问题...")
+    total_to_process = len(questions_to_process)
+    logger.info(f"开始处理 {total_to_process} 个问题（共 {len(ordered_qids)} 个问题，跳过 {len(ordered_qids) - total_to_process} 个）...")
 
     for qid in ordered_qids:
-        if qid in existing_entries:
-            logger.info(f"  跳过已存在的: {qid}")
-            skipped_count += 1
+        if qid not in questions_to_process:
             continue
 
         qtext = question_texts.get(qid, "")
