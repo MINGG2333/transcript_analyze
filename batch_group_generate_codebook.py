@@ -5,12 +5,13 @@
 
 工作流程：
   1. 读取 res/ 下所有访谈 CSV 文件，按 question_id 聚合各访谈的回答
-  2. 对每个问题，调用 LLM 分析所有回答，生成该问题的 code set 以及每个访谈的 code list
+  2. 按 source（问题组）将问题分组，每组调用一次 LLM 分析所有回答，生成该组内每个问题的
+     code set 以及每个访谈的 code list（这样可以降低 LLM 调用次数）
   3. 统计数据：每个 code 的出现次数和比例
   4. 输出 codebook（JSON + Markdown 格式）并存档 LLM 元数据
 
 用法：
-  python batch_generate_codebook.py
+  python batch_group_generate_codebook.py
     [--csv-dir res]
     [--output-dir codebook]
     [--llm-model deepseek-v4-flash]
@@ -38,29 +39,64 @@ from typing import Any, Optional
 import uuid
 
 
-def setup_logger(debug: bool = False):
-    """简易日志"""
-    class Logger:
-        def __init__(self, debug: bool):
-            self.debug_mode = debug
+def setup_logger(debug: bool = False, log_file: str | None = None):
+    """设置日志系统，使用loguru或回退到简单日志"""
+    level = "DEBUG" if debug else "INFO"
+    try:
+        from loguru import logger
+        # 移除默认的处理器，添加我们自己的格式
+        logger.remove()
+        # 添加控制台输出
+        logger.add(
+            sys.stderr,
+            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{message}</cyan>",
+            level=level,
+        )
+        # 添加文件输出（如果指定了日志文件）
+        if log_file:
+            logger.add(
+                log_file,
+                format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
+                level=level,
+                rotation="10 MB",
+            )
+        return logger
+    except ImportError:
+        # 简单的日志类（回退方案）
+        class SimpleLogger:
+            def __init__(self):
+                self.level_colors = {
+                    "INFO": "\033[94m",      # 蓝色
+                    "SUCCESS": "\033[92m",   # 绿色
+                    "WARNING": "\033[93m",   # 黄色
+                    "ERROR": "\033[91m",     # 红色
+                    "RESET": "\033[0m",       # 重置
+                }
 
-        def info(self, msg: str):
-            print(f"[INFO] {msg}")
+            def _log(self, message, level="INFO"):
+                color = self.level_colors.get(level, self.level_colors["RESET"])
+                reset = self.level_colors["RESET"]
+                print(f"{color}[{level}] {message}{reset}")
 
-        def debug(self, msg: str):
-            if self.debug_mode:
-                print(f"[DEBUG] {msg}")
+            def info(self, message):
+                self._log(message, "INFO")
 
-        def warning(self, msg: str):
-            print(f"[WARNING] {msg}")
+            def success(self, message):
+                self._log(message, "SUCCESS")
 
-        def error(self, msg: str):
-            print(f"[ERROR] {msg}")
+            def warning(self, message):
+                self._log(message, "WARNING")
 
-        def success(self, msg: str):
-            print(f"[SUCCESS] {msg}")
+            def error(self, message):
+                self._log(message, "ERROR")
 
-    return Logger(debug)
+            def debug(self, message):
+                self._log(message, "INFO")
+
+            def critical(self, message):
+                self._log(message, "ERROR")
+
+        return SimpleLogger()
 
 
 def ensure_client(llm_model: str, api_base: Optional[str], api_key: Optional[str], logger: Any):
@@ -201,6 +237,183 @@ def build_codebook_prompt(
     ]
 
 
+def build_group_codebook_prompt(
+    source: str,
+    group_questions: list[tuple[str, str, list[tuple[str, str]]]],
+) -> list[dict[str, str]]:
+    """构建用于按组分析多个问题的 codebook prompt
+
+    每组调用一次 LLM，同时分析多个问题的所有访谈回答。
+
+    Args:
+        source: 问题来源组名（如 Q4.1.10）
+        group_questions: [(question_id, question_text, [(interview_name, answer_text), ...]), ...]
+
+    Returns:
+        messages 列表，用于 LLM 调用
+    """
+    lines = []
+    for qid, qtext, answer_items in group_questions:
+        lines.append(f"## 问题 {qid}：{qtext}")
+        for inv_name, answer_text in answer_items:
+            display_text = answer_text if answer_text else "（空）"
+            lines.append(f"[{inv_name}] {display_text}")
+        lines.append("")  # blank line between questions
+
+    answers_block = "\n".join(lines)
+
+    system_prompt = (
+        "你是一个严谨的访谈回答分析助手。你的任务是对一组问题的所有访谈回答进行编码分析。\n\n"
+        "请遵循以下步骤：\n"
+        "1. 仔细阅读每个问题下所有访谈的回答\n"
+        "2. 对每一个问题，识别出所有不同的回答类型/模式，将其精炼为简洁的\"code\"\n"
+        "3. 每个回答可能对应零个、一个或多个code（例如当回答中提及多种措施时，每种措施对应一个code）\n"
+        "4. 如果某个回答为空，应包含code \"空\"\n"
+        "5. 如果回答不确定或模棱两可，应包含code \"未明确回答\"\n\n"
+        "请严格按以下JSON格式输出（每个问题一个独立的条目）：\n"
+        "{\n"
+        '  "results": [\n'
+        "    {\n"
+        '      "question_id": "问题1的ID",\n'
+        '      "code_set": ["code1", "code2", ...],\n'
+        '      "interview_codes": {\n'
+        '        "访谈名称1": ["code1", "code2"],\n'
+        '        "访谈名称2": ["code3"],\n'
+        "        ...\n"
+        "      }\n"
+        "    },\n"
+        "    {\n"
+        '      "question_id": "问题2的ID",\n'
+        "      ...\n"
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "要求：每个问题的code_set必须覆盖该问题所有回答中出现的所有code。"
+        "每个问题的interview_codes中每个访谈的code必须从该问题的code_set中选择。"
+        "必须为每个问题都返回一个结果条目，不能遗漏。"
+    )
+
+    user_prompt = (
+        f"问题组（source）：{source}\n"
+        "以下是该组内所有问题及其各访谈的回答：\n\n"
+        f"{answers_block}\n\n"
+        "请分析以上所有问题的回答，为每个问题分别输出code_set和interview_codes。"
+    )
+
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def compute_group_codes(
+    client: Any,
+    llm_model: str,
+    source: str,
+    group_questions: list[tuple[str, str, dict[str, str]]],
+    logger: Any,
+    llm_archive_dir: Path,
+) -> dict[str, tuple[list[str], dict[str, list[str]], dict[str, Any]]]:
+    """对一组问题调用一次 LLM，生成每个问题的 code set 和 interview codes。
+
+    Args:
+        group_questions: [(question_id, question_text, {interview_name: answer_text}), ...]
+
+    Returns:
+        {question_id: (code_set, interview_codes, llm_meta)}
+    """
+    # Build prompt with all questions
+    question_items = []
+    for qid, qtext, answer_map in group_questions:
+        answer_items = sorted(answer_map.items(), key=lambda x: x[0])
+        question_items.append((qid, qtext, answer_items))
+
+    messages = build_group_codebook_prompt(source, question_items)
+
+    try:
+        parsed, llm_meta = call_llm_json(
+            client, llm_model, messages,
+            f"Codebook分析组 {source}（{len(group_questions)}个问题）",
+            logger,
+        )
+    except Exception as exc:
+        logger.error(f"  组 {source} LLM调用失败: {exc}")
+        # Save failed metadata
+        llm_meta = {
+            "model": llm_model,
+            "description": f"Codebook分析组 {source}",
+            "success": False,
+            "error": str(exc),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "prompt": messages[0]["content"] if messages else "",
+            "response": "",
+        }
+        # Return emergency codes for all questions in the group
+        results = {}
+        for qid, qtext, answer_map in group_questions:
+            emergency_codes = ["有", "没有", "未明确回答", "空"]
+            emergency_interview_codes = {}
+            for inv_name, ans in answer_map.items():
+                codes = []
+                if not ans:
+                    codes.append("空")
+                elif ans in ("无相关证据", "无相关证据。"):
+                    codes.append("没有")
+                else:
+                    codes.append("有")
+                emergency_interview_codes[inv_name] = codes
+            results[qid] = (emergency_codes, emergency_interview_codes, llm_meta)
+        return results
+
+    # Save LLM metadata to archive (group level)
+    group_archive_dir = llm_archive_dir / safe_name(f"group_{source}")
+    group_archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_file = group_archive_dir / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.json"
+    archive_file.write_text(
+        json.dumps(llm_meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    results_list = parsed.get("results", [])
+    # Build a map from question_id to its parsed result
+    parsed_by_qid: dict[str, dict] = {}
+    for r in results_list:
+        qid = r.get("question_id", "")
+        if qid:
+            parsed_by_qid[qid] = r
+
+    results = {}
+    for qid, qtext, answer_map in group_questions:
+        if qid in parsed_by_qid:
+            r = parsed_by_qid[qid]
+            code_set = r.get("code_set", [])
+            interview_codes = r.get("interview_codes", {})
+            # Validate: make sure all codes in interview_codes are in code_set
+            for inv_name, codes in interview_codes.items():
+                for c in codes:
+                    if c not in code_set:
+                        logger.warning(f"  {qid}/{inv_name} 的code '{c}' 不在code_set中，已自动添加")
+                        code_set.append(c)
+            results[qid] = (code_set, interview_codes, llm_meta)
+        else:
+            # Question not found in LLM output, use emergency fallback
+            logger.warning(f"  {qid} 未在LLM输出中找到，使用应急回退")
+            emergency_codes = ["有", "没有", "未明确回答", "空"]
+            emergency_interview_codes = {}
+            for inv_name, ans in answer_map.items():
+                codes = []
+                if not ans:
+                    codes.append("空")
+                elif ans in ("无相关证据", "无相关证据。"):
+                    codes.append("没有")
+                else:
+                    codes.append("有")
+                emergency_interview_codes[inv_name] = codes
+            results[qid] = (emergency_codes, emergency_interview_codes, llm_meta)
+
+    return results
+
+
 def _build_stem_to_live_id(records_path: Path) -> dict[str, str]:
     """从 interview_records.json 构建 CSV stem -> live_id 的映射表。
 
@@ -252,7 +465,7 @@ def decode_interview_name(stem: str) -> str:
     return name
 
 
-def load_all_csvs(csv_dir: Path, logger: Any, records_path: str = "interview_records.json") -> tuple[dict[str, dict[str, str]], dict[str, str], dict[str, dict[str, str]]]:
+def load_all_csvs(csv_dir: Path, logger: Any, records_path: str = "interview_records.json") -> tuple[dict[str, dict[str, str]], dict[str, str], dict[str, dict[str, str]], dict[str, str]]:
     """
     加载所有访谈 CSV 文件。
 
@@ -260,6 +473,7 @@ def load_all_csvs(csv_dir: Path, logger: Any, records_path: str = "interview_rec
         answers_by_q: {question_id: {interview_name: answer_text}}
         question_texts: {question_id: question_text}
         citations_by_q: {question_id: {interview_name: citation_path}}
+        question_sources: {question_id: source_group_name}
     """
     csv_files = sorted(csv_dir.glob("*.csv"))
     logger.info(f"找到 {len(csv_files)} 个访谈 CSV 文件")
@@ -271,6 +485,7 @@ def load_all_csvs(csv_dir: Path, logger: Any, records_path: str = "interview_rec
     answers_by_q: dict[str, dict[str, str]] = {}
     citations_by_q: dict[str, dict[str, str]] = {}
     question_texts: dict[str, str] = {}
+    question_sources: dict[str, str] = {}
     interview_names: list[str] = []
 
     for csv_path in csv_files:
@@ -286,12 +501,14 @@ def load_all_csvs(csv_dir: Path, logger: Any, records_path: str = "interview_rec
                 qtext = row.get("question_text", "").strip()
                 answer = row.get("answer", "").strip()
                 citation_path = row.get("citation_path", "").strip()
+                source = row.get("source", "").strip()
 
                 if not qid:
                     continue
 
                 if qid not in question_texts:
                     question_texts[qid] = qtext
+                    question_sources[qid] = source
 
                 if qid not in answers_by_q:
                     answers_by_q[qid] = {}
@@ -308,7 +525,7 @@ def load_all_csvs(csv_dir: Path, logger: Any, records_path: str = "interview_rec
         logger.warning("重复的访谈名称会导致数据被静默覆盖，请检查 interview_records.json 和 CSV 文件的一致性")
 
     logger.success(f"共加载 {len(answers_by_q)} 个问题，来自 {len(interview_names)} 个访谈（{len(unique_interviews)} 个唯一）")
-    return answers_by_q, question_texts, citations_by_q
+    return answers_by_q, question_texts, citations_by_q, question_sources
 
 
 def compute_codes(
@@ -622,15 +839,15 @@ def generate_markdown_for_single_entry(entry: dict[str, Any], output_path: Path)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="基于访谈 CSV 生成 Codebook")
+    parser = argparse.ArgumentParser(description="基于访谈 CSV 生成 Codebook（按问题组分批调用LLM）")
     parser.add_argument("--csv-dir", default="res", help="访谈 CSV 目录")
     parser.add_argument("--output-dir", default="codebook", help="输出目录")
     parser.add_argument("--llm-model", default="deepseek-v4-flash", help="LLM 模型名")
     parser.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")
     parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY"), help="LLM API key")
     parser.add_argument("--max-questions", type=int, default=0, help="最多处理的问题数，0为全部")
-    parser.add_argument("--skip-existing", action="store_true", help="跳过已存在 codebook 条目的问题（全量模式）")
-    parser.add_argument("--incremental", action="store_true", help="增量模式：只重新分析有新访谈回答加入的问题（避免完全重跑）")
+    parser.add_argument("--skip-existing", action="store_true", help="跳过已存在 codebook 条目的问题组（全量模式）")
+    parser.add_argument("--incremental", action="store_true", help="增量模式：以组为单位检测是否有新访谈回答加入，有则重新分析整组（避免完全重跑）")
     parser.add_argument("--debug", action="store_true", help="启用调试日志")
     args = parser.parse_args()
 
@@ -640,14 +857,35 @@ def main():
     output_dir = Path(args.output_dir)
     llm_archive_dir = output_dir / "llm_archive"
 
-    # Load all CSV files
-    answers_by_q, question_texts, citations_by_q = load_all_csvs(csv_dir, logger)
+    # Load all CSV files (now also returns question_sources)
+    answers_by_q, question_texts, citations_by_q, question_sources = load_all_csvs(csv_dir, logger)
 
-    # Deduplicate: keep questions in order of first appearance
-    ordered_qids = list(question_texts.keys())
+    # Build groups by source
+    groups: dict[str, list[str]] = {}
+    for qid in question_texts:
+        src = question_sources.get(qid, "")
+        if not src:
+            src = "_default_"
+        groups.setdefault(src, []).append(qid)
+
+    if not groups:
+        logger.warning("未找到任何问题分组，请检查 CSV 文件中是否包含 source 列")
+        return
+
+    logger.info(f"共加载 {len(question_texts)} 个问题，分为 {len(groups)} 个组")
 
     if args.max_questions > 0:
-        ordered_qids = ordered_qids[:args.max_questions]
+        # Truncate: limit total questions across groups
+        remaining = args.max_questions
+        truncated_groups: dict[str, list[str]] = {}
+        for src in sorted(groups):
+            take = min(remaining, len(groups[src]))
+            truncated_groups[src] = groups[src][:take]
+            remaining -= take
+            if remaining <= 0:
+                break
+        groups = truncated_groups
+        logger.info(f"限制问题数，仅处理前 {args.max_questions} 个问题")
 
     # Check existing output
     json_output_path = output_dir / "codebook.json"
@@ -661,27 +899,38 @@ def main():
         except Exception as e:
             logger.warning(f"加载现有codebook失败，将重新处理全部: {e}")
 
-    # Determine which questions need processing (incremental mode)
-    questions_to_process: set[str] = set()
+    # Determine which groups need processing
+    # For skip-existing: skip a group if ALL questions in the group already exist
+    # For incremental: process a group if ANY question in the group has new answers
+    # For full mode: process all groups
+    groups_to_process: set[str] = set()
     if args.incremental:
-        # Compare answer count vs existing codebook entries
-        for qid in ordered_qids:
-            current_answer_count = len(answers_by_q.get(qid, {}))
-            existing_entry = existing_entries.get(qid)
-            if existing_entry is None:
-                # New question, needs processing
-                questions_to_process.add(qid)
-            else:
+        # Group-level incremental: check if any question in the group has new answers
+        for src, qids in groups.items():
+            needs_update = False
+            for qid in qids:
+                current_answer_count = len(answers_by_q.get(qid, {}))
+                existing_entry = existing_entries.get(qid)
+                if existing_entry is None:
+                    needs_update = True
+                    break
                 existing_answer_count = len(existing_entry.get("interview_answers", {}))
                 if current_answer_count > existing_answer_count:
-                    questions_to_process.add(qid)
-        logger.info(f"增量模式：{len(questions_to_process)} 个问题有新回答需要重新分析")
+                    needs_update = True
+                    break
+            if needs_update:
+                groups_to_process.add(src)
+        logger.info(f"增量模式：{len(groups_to_process)} 个组需要重新分析（共 {len(groups)} 个组）")
     elif args.skip_existing:
-        # In skip-existing mode, all questions not in existing_entries need processing
-        questions_to_process = set(qid for qid in ordered_qids if qid not in existing_entries)
+        # Skip a group only if ALL its questions exist in existing_entries
+        for src, qids in groups.items():
+            all_exist = all(qid in existing_entries for qid in qids)
+            if not all_exist:
+                groups_to_process.add(src)
+        logger.info(f"跳过已有模式：处理 {len(groups_to_process)} 个组，跳过 {len(groups) - len(groups_to_process)} 个组")
     else:
-        # Full mode: process all questions
-        questions_to_process = set(ordered_qids)
+        groups_to_process = set(groups.keys())
+        logger.info(f"全量模式：处理全部 {len(groups_to_process)} 个组")
 
     # Initialize LLM client
     if not args.api_key:
@@ -703,70 +952,97 @@ def main():
     total_tokens = 0
     processed_count = 0
     skipped_count = 0
+    group_count = 0
 
-    total_to_process = len(questions_to_process)
-    logger.info(f"开始处理 {total_to_process} 个问题（共 {len(ordered_qids)} 个问题，跳过 {len(ordered_qids) - total_to_process} 个）...")
+    total_groups_to_process = len(groups_to_process)
+    total_questions_in_groups = sum(len(qids) for src, qids in groups.items() if src in groups_to_process)
+    logger.info(f"开始处理 {total_groups_to_process} 个组（共 {total_questions_in_groups} 个问题）...")
 
-    for qid in ordered_qids:
-        if qid not in questions_to_process:
+    for src in sorted(groups):
+        if src not in groups_to_process:
+            skipped_count += len(groups[src])
             continue
 
-        qtext = question_texts.get(qid, "")
-        answer_map = answers_by_q.get(qid, {})
-        citation_map = citations_by_q.get(qid, {})
+        qids_in_group = groups[src]
+        group_count += 1
 
-        logger.info(f"[{processed_count + 1}/{len(ordered_qids)}] 处理问题: {qid} ({len(answer_map)} 个回答)")
+        logger.info(f"\n[{group_count}/{total_groups_to_process}] 处理问题组: {src}（{len(qids_in_group)} 个问题）")
+
+        # Build group data for LLM call
+        group_questions: list[tuple[str, str, dict[str, str]]] = []
+        for qid in qids_in_group:
+            qtext = question_texts.get(qid, "")
+            answer_map = answers_by_q.get(qid, {})
+            group_questions.append((qid, qtext, answer_map))
 
         if emergency_mode:
-            # Emergency mode: do basic categorization
-            code_set = ["有", "没有", "未明确回答", "空"]
-            interview_codes = {}
-            for inv_name, ans in answer_map.items():
-                codes = []
-                if not ans:
-                    codes.append("空")
-                elif ans.strip() in ("无相关证据", "无相关证据。", "无相关证据，"):
-                    codes.append("没有")
-                elif "是" in ans or "有" in ans or "已" in ans:
-                    codes.append("有")
-                else:
-                    codes.append("未明确回答")
-                interview_codes[inv_name] = codes
-            llm_meta = {"success": True, "note": "应急模式（未使用LLM）", "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "timestamp": datetime.now().isoformat(timespec="seconds")}
+            # Emergency mode: basic categorization for each question
+            for qid, qtext, answer_map in group_questions:
+                citation_map = citations_by_q.get(qid, {})
+                code_set = ["有", "没有", "未明确回答", "空"]
+                interview_codes = {}
+                for inv_name, ans in answer_map.items():
+                    codes = []
+                    if not ans:
+                        codes.append("空")
+                    elif ans.strip() in ("无相关证据", "无相关证据。", "无相关证据，"):
+                        codes.append("没有")
+                    elif "是" in ans or "有" in ans or "已" in ans:
+                        codes.append("有")
+                    else:
+                        codes.append("未明确回答")
+                    interview_codes[inv_name] = codes
+                llm_meta = {"success": True, "note": "应急模式（未使用LLM）", "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "timestamp": datetime.now().isoformat(timespec="seconds")}
+
+                entry = build_codebook_entry(qid, qtext, answer_map, citation_map, code_set, interview_codes, llm_meta)
+                entries.append(entry)
+                processed_count += 1
+
+                # Save individual per-question codebook
+                safe_qid = safe_name(qid)
+                per_q_json = per_question_dir / f"{safe_qid}.json"
+                per_q_md = per_question_dir / f"{safe_qid}.md"
+                per_q_json.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
+                generate_markdown_for_single_entry(entry, per_q_md)
         else:
-            code_set, interview_codes, llm_meta = compute_codes(
-                client, args.llm_model, qid, qtext, answer_map, logger, llm_archive_dir,
+            # Call LLM once for the entire group
+            group_results = compute_group_codes(
+                client, args.llm_model, src, group_questions, logger, llm_archive_dir,
             )
-            total_tokens += llm_meta.get("total_tokens", 0)
 
-        entry = build_codebook_entry(qid, qtext, answer_map, citation_map, code_set, interview_codes, llm_meta)
-        entries.append(entry)
-        processed_count += 1
+            # Process each question's result
+            for qid, qtext, answer_map in group_questions:
+                citation_map = citations_by_q.get(qid, {})
+                code_set, interview_codes, llm_meta = group_results[qid]
+                total_tokens += llm_meta.get("total_tokens", 0)
 
-        # Save individual per-question codebook (JSON + Markdown)
-        safe_qid = safe_name(qid)
-        per_q_json = per_question_dir / f"{safe_qid}.json"
-        per_q_md = per_question_dir / f"{safe_qid}.md"
-        per_q_json.write_text(
-            json.dumps(entry, ensure_ascii=False, indent=2),
+                entry = build_codebook_entry(qid, qtext, answer_map, citation_map, code_set, interview_codes, llm_meta)
+                entries.append(entry)
+                processed_count += 1
+
+                # Save individual per-question codebook (JSON + Markdown)
+                safe_qid = safe_name(qid)
+                per_q_json = per_question_dir / f"{safe_qid}.json"
+                per_q_md = per_question_dir / f"{safe_qid}.md"
+                per_q_json.write_text(
+                    json.dumps(entry, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                generate_markdown_for_single_entry(entry, per_q_md)
+                logger.info(f"  ✓ {qid} 已保存单题codebook: {safe_qid}.json/.md")
+
+        # Save intermediate results after each group
+        logger.info(f"  组 {src} 处理完成，保存中间结果...")
+        json_output_path.write_text(
+            json.dumps(entries, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        generate_markdown_for_single_entry(entry, per_q_md)
-        logger.info(f"  已保存单题codebook: {safe_qid}.json/.md")
-
-        # Save intermediate results periodically
-        if processed_count % 10 == 0:
-            logger.info(f"  已处理 {processed_count} 个问题，保存中间结果...")
-            json_output_path.write_text(
-                json.dumps(entries, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            md_output_path = output_dir / "codebook.md"
-            generate_markdown_codebook(entries, md_output_path)
-            logger.info(f"  中间结果已保存")
+        md_output_path = output_dir / "codebook.md"
+        generate_markdown_codebook(entries, md_output_path)
+        logger.info(f"  中间结果已保存（共 {processed_count} 个问题）")
 
     # Final save
-    logger.success(f"\n处理完成！总处理: {processed_count} 个问题, 跳过: {skipped_count} 个")
+    logger.success(f"\n处理完成！总处理: {processed_count} 个问题（{group_count} 个组）, 跳过: {skipped_count} 个问题")
     logger.info(f"总 Token 用量: {total_tokens}")
 
     json_output_path.write_text(
@@ -784,6 +1060,8 @@ def main():
         "total_questions": len(entries),
         "processed_questions": processed_count,
         "skipped_questions": skipped_count,
+        "total_groups": len(groups),
+        "processed_groups": group_count,
         "total_interviews": len(set(
             inv for q_entry in entries
             for inv in q_entry.get("interview_answers", {})
