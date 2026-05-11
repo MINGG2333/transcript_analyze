@@ -2,7 +2,7 @@
 """
 batch_insight_ask.py - 跨访谈Insight分析脚本（基于CSV直读模式）
 
-将25个洞察问题按主题分组，直接从 res/访谈*.csv 中读取各访谈对应协议问题的回答，
+将29个洞察问题按主题分组，直接从 res/访谈*.csv 中读取各访谈对应协议问题的回答，
 由LLM进行跨访谈聚合分析，输出每个主题组的综合洞见报告（含支持依据引用）。
 
 相较基于知识库（kb_qa）的模式，本脚本：
@@ -35,7 +35,7 @@ from kb_qa.cli import setup_logger
 
 
 # ============================================================
-# 协议问题映射：洞察问题(Q1-Q25) -> 协议 question_id 前缀/列表
+# 协议问题映射：洞察问题(Q1-Q29) -> 协议 question_id 前缀/列表
 # ============================================================
 
 # 每个洞察问题对应哪些协议问题的question_id前缀
@@ -262,6 +262,35 @@ QUESTION_PROTOCOL_MAP: dict[str, dict[str, Any]] = {
         "protocol_include_prefix": [],
         "suffix_filter": [],
     },
+    # === G10: 工具链局限与不足 ===
+    "Q26": {
+        "description": "工具链的局限性或不足",
+        "protocol_include": ["Q5.1.5", "Q5.1.11"],
+        "protocol_include_prefix": [],
+        "suffix_filter": [],
+    },
+    # === G11: 所需网络安全知识技能 ===
+    "Q27": {
+        "description": "所需网络安全知识或技能",
+        "protocol_include": ["Q5.2.1"],
+        "protocol_include_prefix": [],
+        "suffix_filter": [],
+    },
+    # === G12: 人才招聘素质要求 ===
+    "Q28": {
+        "description": "招聘人才的素质要求",
+        "protocol_include": ["Q5.2.1"],
+        "protocol_include_prefix": [],
+        "suffix_filter": [],
+        "fallback_note": "协议未直接询问招聘要求，从Q5.2.1（关键知识技能）推断",
+    },
+    # === G13: 基础设施频次 ===
+    "Q29": {
+        "description": "常见基础设施频次",
+        "protocol_include": ["Q5.3.1", "Q5.3.2"],
+        "protocol_include_prefix": [],
+        "suffix_filter": [],
+    },
 }
 
 
@@ -407,6 +436,68 @@ QUESTION_GROUPS: list[dict[str, Any]] = [
             "3) 合规挑战：在网络安全合规过程中遇到了哪些最具挑战性的方面？"
             "如标准理解困难、合规成本高、标准与具体实践脱节、跨地区标准差异、合规流程复杂等。\n\n"
             "请详细列出各项发现，尽可能提供量化信息，并引用受访者的原话作为支持依据。"
+        ),
+    },
+    # === G10: 工具链局限与不足 ===
+    {
+        "group_id": "G10",
+        "group_name": "工具链局限与不足",
+        "description": "专门分析网络安全工具链的局限性或不足（与G04的Q9有所区别，更聚焦工具链整体）",
+        "insight_questions": ["Q26"],
+        "combined_question": (
+            "请基于所有受访者的访谈内容，综合分析目前网络安全工具链的局限性或不足有哪些？\n\n"
+            "受访者在日常工作中使用的网络安全工具链（包括但不限于代码安全分析工具、通信安全测试工具、"
+            "整车安全测试工具、云安全测试工具、漏洞扫描工具、渗透测试工具、模糊测试工具等）存在哪些限制或不足？\n"
+            "例如：功能不全、误报率高、集成困难、成本过高、操作复杂、无法覆盖特定攻击面、"
+            "自动化程度低、对国内标准支持不足、缺乏针对智能网联汽车特殊场景的工具等。\n\n"
+            "请详细列出各项发现，尽可能提供量化信息（如多少受访者提及了同一类问题），并引用受访者的原话作为支持依据。"
+        ),
+    },
+    # === G11: 所需网络安全知识技能 ===
+    {
+        "group_id": "G11",
+        "group_name": "所需网络安全知识技能",
+        "description": "分析从事网络安全工作需要的知识或技能类型",
+        "insight_questions": ["Q27"],
+        "combined_question": (
+            "请基于所有受访者的访谈内容，综合分析从事网络安全工作需要哪些网络安全知识或技能？\n\n"
+            "受访者认为从事网络安全工作应该具备哪些具体的网络安全知识或专业技能？\n"
+            "例如：渗透测试、密码学与加密技术、安全架构设计、嵌入式/固件安全、通信安全（CAN/V2X等）、"
+            "合规知识（ISO 21434、UN R155等）、威胁建模与风险评估(TARA)、安全编码、逆向工程、"
+            "云安全、AI/ML安全、漏洞分析与管理、安全测试（模糊测试、渗透测试）等。\n\n"
+            "请按照被提及的频次或重要程度排序，尽可能提供量化统计，并引用受访者的原话作为支持依据。"
+        ),
+    },
+    # === G12: 人才招聘素质要求 ===
+    {
+        "group_id": "G12",
+        "group_name": "人才招聘素质要求",
+        "description": "分析对招聘网络安全人才的素质要求",
+        "insight_questions": ["Q28"],
+        "combined_question": (
+            "请基于所有受访者的访谈内容，综合分析当前行业对招聘网络安全人才的素质要求有哪些？\n\n"
+            "受访者所在组织在招聘网络安全相关岗位时，对人才有哪些具体的素质要求？\n"
+            "包括但不限于：\n"
+            "- 技术能力：特定领域知识（如车载网络、密码学、嵌入式系统）、编程能力、安全测试经验等\n"
+            "- 软素质：学习能力、沟通能力、团队协作、问题解决能力、安全意识等\n"
+            "- 认证/资质：CISSP、CISP、CEH等安全认证，学历背景等\n"
+            "- 行业经验：是否有汽车行业安全经验、是否有合规项目经验等\n\n"
+            "请详细列出各类素质要求，尽可能提供量化信息，并引用受访者的原话作为支持依据。"
+        ),
+    },
+    # === G13: 常见基础设施频次 ===
+    {
+        "group_id": "G13",
+        "group_name": "常见基础设施频次",
+        "description": "统计常见网络安全基础设施被提及的频次",
+        "insight_questions": ["Q29"],
+        "combined_question": (
+            "请基于所有受访者的访谈内容，统计分析当前常见的网络安全基础设施有哪些，以及各类基础设施被提及的频次。\n\n"
+            "受访者提到了哪些网络安全基础设施或组织支持？请统计各类基础设施/支持被提及的频次。\n"
+            "例如：安全测试实验室/环境、云安全平台、PKI/证书管理基础设施、SIEM安全事件管理平台、"
+            "漏洞管理平台、安全开发生命周期管理平台、威胁情报平台、合规文档管理平台、"
+            "硬件安全模块(HSM)、安全网关、入侵检测系统(IDS)等。\n\n"
+            "请按照被提及频次从高到低排序，明确列出每类基础设施被多少位受访者提及，并引用受访者的原话作为支持依据。"
         ),
     },
 ]
@@ -786,7 +877,7 @@ def main() -> None:
     parser.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")
     parser.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY"), help="LLM API key")
     parser.add_argument("--limit-groups", type=int, default=0, help="只处理前N个组，0为全部")
-    parser.add_argument("--skip-existing", action="store_true", help="跳过已有结果的组")
+    parser.add_argument("--skip-existing", default=True, help="跳过已有结果的组")
     parser.add_argument("--debug", default=True, help="启用调试日志")
     args = parser.parse_args()
 
