@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import random
+import time
 from typing import Any, Optional
 import uuid
 
@@ -44,25 +45,21 @@ class VideoKnowledgeQA:
             self.logger.info(f"记录文件路径: {self.records_path}")
             self.logger.info(f"字幕根目录: {self.subtitle_root}")
             self.logger.info(f"知识库目录: {self.kb_dir}")
-        
+
         all_segments = list(collect_segments(self.records_path, self.subtitle_root))
         if self.logger:
             self.logger.info(f"解析得到 {len(all_segments)} 个片段")
 
-            # 统计不同类型的片段
-            speech_count = sum(1 for seg in all_segments if seg.source_type == "speech")
-            danmaku_count = sum(1 for seg in all_segments if seg.source_type == "danmaku")
-            self.logger.info(f"片段类型统计: 主播讲话({speech_count}) | 观众弹幕({danmaku_count})")
+            # 动态统计不同类型的片段
+            participant_types = {}
+            for seg in all_segments:
+                participant_types[seg.source_type] = participant_types.get(seg.source_type, 0) + 1
+            self.logger.info(f"片段类型统计: {participant_types}")
 
             self.logger.info("=== 示例片段（随机挑选） ===")
             sample_segments = []
-            if speech_count:
-                sample_segments.append(random.choice([seg for seg in all_segments if seg.source_type == "speech"]))
-            if danmaku_count:
-                sample_segments.append(random.choice([seg for seg in all_segments if seg.source_type == "danmaku"]))
-            if len(sample_segments) < 2 and all_segments:
-                sample_segments.append(random.choice(all_segments))
-
+            if all_segments:
+                sample_segments = random.sample(all_segments, min(3, len(all_segments)))
             for seg in sample_segments:
                 self.logger.info(f"[{seg.source_label}] 完整信息:")
                 self.logger.info(f"  segment_id: {seg.segment_id}")
@@ -77,48 +74,13 @@ class VideoKnowledgeQA:
                 self.logger.info(f"  video_offset: {seg.hhmmss}")
                 self.logger.info(f"  text: {seg.text!r}")
 
-            if danmaku_count == 0:
-                self.logger.warning("未解析到观众弹幕片段，请检查danmu_path和LRC文件格式是否正确")
-            
-            # 随机选取一些记录，详细统计其中的srt和lrc文件
-            self.logger.info("=== 随机文件详细统计 ===")
-            from .parsers import load_records, infer_subtitle_path, parse_srt, parse_lrc
-            records = load_records(self.records_path)
-            valid_records = [rec for rec in records.values() if rec.get("video_path")]
-            
-            if valid_records:
-                sample_records = random.sample(valid_records, min(2, len(valid_records)))
-                for rec in sample_records:
-                    srt_path = infer_subtitle_path(rec, self.subtitle_root)
-                    lrc_path = Path(rec.get("danmu_path", "")) if rec.get("danmu_path") else None
-                    
-                    self.logger.info(f"\n记录 LiveId={rec['live_id']} ({rec.get('title', 'N/A')})")
-                    
-                    if srt_path.exists():
-                        srt_segs = parse_srt(srt_path, rec)
-                        self.logger.info(f"  字幕文件 (SRT): {Path(srt_path)}")
-                        self.logger.info(f"    片段数: {len(srt_segs)}")
-                        if srt_segs:
-                            sample = random.choice(srt_segs)
-                            self.logger.info(f"    示例: [{sample.hhmmss}] {sample.anchor_name} | {sample.text[:80]!r}")
-                    else:
-                        self.logger.info(f"  字幕文件 (SRT): 不存在 ({srt_path})")
-                    
-                    if lrc_path and lrc_path.exists():
-                        lrc_segs = parse_lrc(lrc_path, rec)
-                        self.logger.info(f"  弹幕文件 (LRC): {Path(lrc_path)}")
-                        self.logger.info(f"    片段数: {len(lrc_segs)}")
-                        if lrc_segs:
-                            sample = random.choice(lrc_segs)
-                            self.logger.info(f"    示例: [{sample.hhmmss}] {sample.anchor_name} | {sample.text[:80]!r}")
-                    else:
-                        lrc_name = Path(rec.get("danmu_path", "unknown")) if rec.get("danmu_path") else "unknown"
-                        self.logger.info(f"  弹幕文件 (LRC): 不存在或未配置 ({lrc_name})")
-        
+            if not all_segments:
+                self.logger.warning("未解析到任何片段，请检查字幕文件和记录格式是否正确")
+
         changed = self.store.upsert_many(all_segments)
         if self.logger:
             self.logger.info(f"检测到 {len(changed)} 个新或更新的片段")
-        
+
         if changed:
             if self.logger:
                 self.logger.info("开始更新向量索引（这可能需要几分钟，请耐心等待...）")
@@ -133,7 +95,7 @@ class VideoKnowledgeQA:
         else:
             if self.logger:
                 self.logger.info("没有新的片段，无需更新索引")
-        
+
         stat = {
             "parsed_segments": len(all_segments),
             "updated_segments": len(changed),
@@ -141,7 +103,7 @@ class VideoKnowledgeQA:
         }
         if self.logger:
             self.logger.success(f"构建完成: {stat}")
-        
+
         return stat
 
     def retrieve(
@@ -157,6 +119,7 @@ class VideoKnowledgeQA:
     ) -> tuple[list[Segment], dict[str, Any]]:
         if self.logger:
             self.logger.info(f"[1/5] 开始从向量索引检索，top_k={vector_top_k}, score_threshold={vector_score_threshold}")
+            self.logger.debug(f"向量索引检索input: {question}")
         vector_ids, vector_scores = self.vector.retrieve(question, top_k=vector_top_k)
         # Filter by score threshold
         vector_filtered = [(sid, score) for sid, score in zip(vector_ids, vector_scores) if score >= vector_score_threshold]
@@ -290,7 +253,7 @@ class VideoKnowledgeQA:
             {
                 "role": "user",
                 "content": (
-                    "你是一个中文检索查询优化助手。请把下面的用户问题改写成一个或多个关键词，用于BM25检索。规则：只保留问题中的核心命名实体，去掉疑问词、助词和无关表达。若该名称由重复的单一汉字组成（如“顺顺”），则需同时输出该单字和完整名称。基本原则是用这些关键词搜索到的文本范围内会有问题的答案，关键词越少越好，每增加一个关键词，需要缩小搜索范围而不是扩大。\\n"
+                    "你是一个中文检索查询优化助手。请把下面的用户问题改写成一个或多个关键词，用于BM25检索。规则：只保留问题中的核心命名实体，去掉疑问词、助词和无关表达。若该名称由重复的单一汉字组成（如\"顺顺\"），则需同时输出该单字和完整名称。基本原则是用这些关键词搜索到的文本范围内会有问题的答案，关键词越少越好，每增加一个关键词，需要缩小搜索范围而不是扩大。\n"
                     f"用户问题：{question}\n"
                     "请输出JSON对象：{\"refined_query\":\"...\"}。\n"
                     "仅输出JSON，不要额外文本。"
@@ -299,6 +262,8 @@ class VideoKnowledgeQA:
         ]
 
     def _refine_bm25_query(self, question: str) -> tuple[str, dict[str, Any]]:
+        if self.logger:
+            self.logger.debug(f"BM25查询改写input: {question}")
         prompt_messages = self._build_bm25_refinement_prompt(question)
         try:
             parsed, llm_metadata = self._call_llm_json(prompt_messages, "BM25 查询改写")
@@ -318,52 +283,146 @@ class VideoKnowledgeQA:
                 "response": "",
             }
 
-    def _call_llm_json(self, messages: list[dict[str, str]], description: str) -> tuple[dict[str, Any], dict[str, Any]]:
-        if self.logger:
-            self.logger.info(f"调用LLM: {description}")
-        resp = self.client.chat.completions.create(
-            model=self.llm_model,
-            messages=messages,
-            temperature=0,
-            response_format={"type": "json_object"},
-        )
-        content = resp.choices[0].message.content or "{}"
-        
-        # 记录LLM元数据
-        llm_metadata = {
-            "model": self.llm_model,
-            "description": description,
-            "input_tokens": getattr(resp.usage, "prompt_tokens", 0),
-            "output_tokens": getattr(resp.usage, "completion_tokens", 0),
-            "total_tokens": getattr(resp.usage, "total_tokens", 0),
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "prompt": messages[0]["content"] if messages and messages[0].get("role") == "user" else "",
-            "response": content,
-        }
-        
-        if self.logger:
-            self.logger.info(f"  tokens: input={llm_metadata['input_tokens']}, output={llm_metadata['output_tokens']}, total={llm_metadata['total_tokens']}")
-        
+    def _format_segment_with_local_context(
+        self,
+        segment: Segment,
+        context_window: int = 6,
+    ) -> str:
+        """格式化单个片段及其局部上下文，供合成阶段使用。"""
+        key = segment.live_id
+        seq = self.store.by_live_source.get(key, [])
+        if not seq:
+            return (
+                f"[{segment.segment_id}] 类型={segment.source_label}; 直播时间={segment.video_datetime}; "
+                f"视频内时间={segment.hhmmss}; 标题={segment.video_title}; 用户名={segment.anchor_name};\n"
+                f"核心片段内容：{segment.text}"
+            )
+
         try:
-            parsed = json.loads(content)
-            llm_metadata["success"] = True
-            return parsed, llm_metadata
-        except json.JSONDecodeError:
-            if self.logger:
-                self.logger.warning(f"LLM返回JSON解析失败，尝试提取内容: {description}")
-            start = content.find("{")
-            end = content.rfind("}")
-            if start != -1 and end != -1 and end > start:
+            pos = seq.index(segment.segment_id)
+        except ValueError:
+            return (
+                f"[{segment.segment_id}] 类型={segment.source_label}; 直播时间={segment.video_datetime}; "
+                f"视频内时间={segment.hhmmss}; 标题={segment.video_title}; 用户名={segment.anchor_name};\n"
+                f"核心片段内容：{segment.text}"
+            )
+
+        start = max(0, pos - context_window)
+        end = min(len(seq), pos + context_window + 1)
+        local_lines: list[str] = []
+        for idx in range(start, end):
+            sid = seq[idx]
+            local_seg = self.store.segments.get(sid)
+            if not local_seg:
+                continue
+            marker = "核心片段" if sid == segment.segment_id else "上下文片段"
+            local_lines.append(
+                f"  - [{marker}] ({local_seg.hhmmss}) {local_seg.text}"
+            )
+
+        local_context = "\n".join(local_lines)
+        return (
+            f"[{segment.segment_id}] 类型={segment.source_label}; 直播时间={segment.video_datetime}; "
+            f"视频内时间={segment.hhmmss}; 标题={segment.video_title}; 用户名={segment.anchor_name};\n"
+            f"局部上下文（同一直播同一来源，窗口={context_window}）：\n{local_context}"
+        )
+
+    def _call_llm_json(
+        self,
+        messages: list[dict[str, str]],
+        description: str,
+        max_retries: int = 5,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """调用LLM API 并解析JSON响应，包含重试机制（指数退避）。
+
+        Args:
+            messages: 聊天消息列表
+            description: 本次调用的描述
+            max_retries: 最大重试次数，默认5次
+
+        Returns:
+            (解析后的JSON对象, LLM元数据字典)
+
+        Raises:
+            RuntimeError: 当所有重试均失败时抛出
+        """
+        last_raw = None
+
+        for attempt in range(max_retries):
+            try:
+                if self.logger:
+                    self.logger.info(f"调用LLM: {description} (尝试 {attempt+1}/{max_retries})")
+
+                resp = self.client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=messages,
+                    temperature=0,
+                    response_format={"type": "json_object"},
+                )
+                content = resp.choices[0].message.content or "{}"
+                last_raw = content  # 保存原始内容
+
+                # 记录LLM元数据
+                llm_metadata = {
+                    "model": self.llm_model,
+                    "description": description,
+                    "input_tokens": getattr(resp.usage, "prompt_tokens", 0),
+                    "output_tokens": getattr(resp.usage, "completion_tokens", 0),
+                    "total_tokens": getattr(resp.usage, "total_tokens", 0),
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "prompt": messages[0]["content"] if messages and messages[0].get("role") == "user" else "",
+                    "response": content,
+                }
+
+                if self.logger:
+                    self.logger.info(f"  tokens: input={llm_metadata['input_tokens']}, output={llm_metadata['output_tokens']}, total={llm_metadata['total_tokens']}")
+
                 try:
-                    parsed = json.loads(content[start : end + 1])
+                    parsed = json.loads(content)
                     llm_metadata["success"] = True
-                    llm_metadata["note"] = "通过字符串提取成功解析"
                     return parsed, llm_metadata
                 except json.JSONDecodeError:
-                    pass
-            llm_metadata["success"] = False
-            llm_metadata["error"] = f"无法将LLM响应解析为JSON: {content}"
-            raise RuntimeError(llm_metadata["error"])
+                    if self.logger:
+                        self.logger.warning(f"LLM返回JSON解析失败，尝试提取内容: {description}")
+                    start = content.find("{")
+                    end = content.rfind("}")
+                    if start != -1 and end != -1 and end > start:
+                        try:
+                            parsed = json.loads(content[start : end + 1])
+                            llm_metadata["success"] = True
+                            llm_metadata["note"] = "通过字符串提取成功解析"
+                            return parsed, llm_metadata
+                        except json.JSONDecodeError:
+                            pass
+                    # JSON解析失败，如果还有重试机会则继续，否则抛出异常
+                    if attempt < max_retries - 1:
+                        wait_time = 5 ** attempt
+                        if self.logger:
+                            self.logger.warning(f"JSON解析失败 (第 {attempt+1} 次)，等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        llm_metadata["success"] = False
+                        llm_metadata["error"] = f"无法将LLM响应解析为JSON: {content}"
+                        raise RuntimeError(llm_metadata["error"])
+
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f"LLM请求异常 (第 {attempt+1} 次): {e}")
+
+                # 如果还有重试机会则继续
+                if attempt < max_retries - 1:
+                    wait_time = 5 ** attempt
+                    if self.logger:
+                        self.logger.warning(f"等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    # 所有重试均失败
+                    error_msg = f"LLM调用在 {max_retries} 次重试后仍失败"
+                    if self.logger:
+                        self.logger.error(error_msg)
+                    raise RuntimeError(error_msg) from e
 
     def _build_analysis_prompt(
         self,
@@ -416,7 +475,7 @@ class VideoKnowledgeQA:
                 self.logger.info(
                     f"分析候选批次 {batch_index + 1}/{total_batches}，包含 {len(batch)} 个片段"
                 )
-            
+
             # 第一批时打印详细日志
             if batch_index == 0 and self.logger:
                 self.logger.info("=== 批次1详细信息 ===")
@@ -424,21 +483,21 @@ class VideoKnowledgeQA:
                     self.logger.info(f"  片段{i}: [{seg.segment_id}] {seg.source_label} {seg.hhmmss} {seg.text[:80]}")
                 if len(batch) > 3:
                     self.logger.info(f"  ... 还有 {len(batch) - 3} 个片段")
-            
+
             try:
                 prompt_messages = self._build_analysis_prompt(question, batch, batch_index + 1, total_batches)
                 parsed, llm_metadata = self._call_llm_json(
                     prompt_messages,
                     f"候选分析 {batch_index + 1}/{total_batches}",
                 )
-                
+
                 # 第一批时打印prompt和response
                 if batch_index == 0 and self.logger:
                     self.logger.info("=== 批次1 LLM Prompt ===")
                     self.logger.info(prompt_messages[0]["content"])
                     self.logger.info("=== 批次1 LLM Response ===")
                     self.logger.info(json.dumps(parsed, ensure_ascii=False))
-                
+
                 llm_calls.append(llm_metadata)
             except Exception as exc:
                 if self.logger:
@@ -501,21 +560,28 @@ class VideoKnowledgeQA:
         }
         return analysis, useful_segments, summary, llm_calls
 
-    def _build_synthesis_prompt(self, question: str, useful_segments: list[Segment]) -> list[dict[str, str]]:
+    def _build_synthesis_prompt(
+        self,
+        question: str,
+        useful_segments: list[Segment],
+        synthesis_context_window: int,
+    ) -> list[dict[str, str]]:
         lines: list[str] = []
         for s in useful_segments:
             lines.append(
-                f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
+                self._format_segment_with_local_context(
+                    s,
+                    context_window=synthesis_context_window,
+                )
             )
         context = "\n".join(lines)
         return [
             {
                 "role": "user",
                 "content": (
-                    "你是严谨的证据型问答助手。请只使用下面列出的有用片段回答问题，不能臆造。\n"
+                    "你是严谨的证据型问答助手。请只使用下面列出的有用片段及其局部上下文回答问题，不能臆造。\n"
                     f"用户问题：{question}\n\n"
-                    "片段列表：\n"
+                    "片段列表（每条含核心片段和局部上下文）：\n"
                     f"{context}\n\n"
                     "请输出JSON对象，格式为：\n"
                     '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
@@ -531,23 +597,25 @@ class VideoKnowledgeQA:
         ]
 
     def _build_batch_synthesis_prompt(
-        self, question: str, segments: list[Segment], batch_index: int, total_batches: int
+        self,
+        question: str,
+        segments: list[Segment],
+        batch_index: int,
+        total_batches: int,
+        synthesis_context_window: int,
     ) -> list[dict[str, str]]:
         lines: list[str] = []
         for s in segments:
-            lines.append(
-                f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
-            )
+            lines.append(self._format_segment_with_local_context(s, context_window=synthesis_context_window))
         context = "\n".join(lines)
         return [
             {
                 "role": "user",
                 "content": (
-                    "你是严谨的证据型问答助手。请根据下面的片段总结与问题相关的关键信息。\n"
+                    "你是严谨的证据型问答助手。请根据下面的片段及其局部上下文总结与问题相关的关键信息。\n"
                     f"用户问题：{question}\n"
                     f"这是第 {batch_index}/{total_batches} 批片段。\n\n"
-                    "片段列表：\n"
+                    "片段列表（每条含核心片段和局部上下文）：\n"
                     f"{context}\n\n"
                     "请输出JSON对象，格式为：\n"
                     '{"summary":"...","key_segments":[{"segment_id":"...","reason":"..."}]}\n'
@@ -559,55 +627,123 @@ class VideoKnowledgeQA:
             }
         ]
 
+    def _build_citations_from_evidence(
+        self,
+        evidence: list[dict[str, Any]],
+        useful_segments: list[Segment],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        id_to_seg = {s.segment_id: s for s in useful_segments}
+        normalized_evidence = list(evidence)
+        citations: list[dict[str, Any]] = []
+
+        for idx, item in enumerate(normalized_evidence, start=1):
+            sid = item.get("segment_id")
+            seg = id_to_seg.get(sid)
+            if not seg:
+                continue
+            citations.append(
+                {
+                    "citation_id": f"#{idx}",
+                    "segment_id": sid,
+                    "source_type": seg.source_label,
+                    "quoted_text": seg.text,
+                    "video_offset": seg.hhmmss,
+                    "absolute_time": seg.absolute_time,
+                    "source_file": seg.file_path,
+                    "video_path": seg.video_path,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "live_id": seg.live_id,
+                    "reason": item.get("reason", ""),
+                }
+            )
+
+        cited_segment_ids = {item.get("segment_id") for item in normalized_evidence if item.get("segment_id")}
+        missing_segments = [seg for seg in useful_segments if seg.segment_id not in cited_segment_ids]
+        if missing_segments and self.logger:
+            self.logger.warning(f"LLM 遗漏了 {len(missing_segments)} 个有用段，将自动添加到 evidence")
+        for seg in missing_segments:
+            reason = f"该片段包含与问题相关的有用信息：{seg.text[:100]}..."
+            normalized_evidence.append(
+                {
+                    "segment_id": seg.segment_id,
+                    "reason": reason,
+                }
+            )
+            citations.append(
+                {
+                    "citation_id": f"#{len(citations) + 1}",
+                    "segment_id": seg.segment_id,
+                    "source_type": seg.source_label,
+                    "quoted_text": seg.text,
+                    "video_offset": seg.hhmmss,
+                    "absolute_time": seg.absolute_time,
+                    "source_file": seg.file_path,
+                    "video_path": seg.video_path,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "live_id": seg.live_id,
+                    "reason": reason,
+                }
+            )
+        return citations, normalized_evidence
+
     def _synthesize_with_batches(
         self,
         question: str,
         useful_segments: list[Segment],
         batch_size: int = 200,
+        synthesis_context_window: int = 6,
     ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
         """用分组合成的方式处理大量有用段。返回 (answer_text, final_evidence, llm_metadata)"""
         total_segments = len(useful_segments)
         total_batches = max(1, (total_segments + batch_size - 1) // batch_size)
-        
+
         if self.logger:
             self.logger.info(
                 f"准备分批合成最终回答，共 {total_segments} 个有用片段，分 {total_batches} 批处理"
             )
-        
+
         batch_summaries: list[dict[str, Any]] = []
         key_segment_ids: set[str] = set()
         all_llm_calls: list[dict[str, Any]] = []
-        
+
         # 第一阶段：对每批片段进行合成
         for batch_idx in range(total_batches):
             start = batch_idx * batch_size
             end = min(start + batch_size, total_segments)
             batch = useful_segments[start:end]
-            
+
             if self.logger:
                 self.logger.info(f"处理第 {batch_idx + 1}/{total_batches} 批，包含 {len(batch)} 个片段")
-            
+
             try:
-                prompt = self._build_batch_synthesis_prompt(question, batch, batch_idx + 1, total_batches)
+                prompt = self._build_batch_synthesis_prompt(
+                    question,
+                    batch,
+                    batch_idx + 1,
+                    total_batches,
+                    synthesis_context_window=synthesis_context_window,
+                )
                 parsed, llm_metadata = self._call_llm_json(
                     prompt,
                     f"批次合成 {batch_idx + 1}/{total_batches}",
                 )
                 summary = parsed.get("summary", "").strip()
                 key_segs = parsed.get("key_segments", []) or []
-                
+
                 batch_summaries.append({
                     "batch_index": batch_idx + 1,
                     "summary": summary,
                     "segment_count": len(batch),
                 })
-                
+
                 for seg_info in key_segs:
                     if seg_info.get("segment_id"):
                         key_segment_ids.add(seg_info["segment_id"])
-                
+
                 all_llm_calls.append(llm_metadata)
-                
+
                 if self.logger:
                     self.logger.info(
                         f"批次 {batch_idx + 1} 合成完成，共提取 {len(key_segs)} 个关键段"
@@ -629,33 +765,35 @@ class VideoKnowledgeQA:
                 # 如果合成失败，将此批所有段作为关键段保留
                 for seg in batch:
                     key_segment_ids.add(seg.segment_id)
-        
+
         # 第二阶段：基于所有批次的合成，生成最终答案
         if self.logger:
             self.logger.info(f"第一阶段合成完成，提取了 {len(key_segment_ids)} 个关键段，准备生成最终答案")
-        
+
         # 选出关键段及所有段（确保完整性）
         key_segments = [seg for seg in useful_segments if seg.segment_id in key_segment_ids]
-        
+
         final_evidence: list[dict[str, Any]] = []
         final_answer = ""
         final_llm_metadata = {}
-        
+
         try:
             # 构建最终合成 prompt，包含批次摘要和关键段
             batch_summary_text = "\n".join([
                 f"[第{s['batch_index']}批] {s['summary']}"
                 for s in batch_summaries
             ])
-            
+
             lines: list[str] = []
             for s in key_segments:
                 lines.append(
-                    f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                    f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
+                    self._format_segment_with_local_context(
+                        s,
+                        context_window=synthesis_context_window,
+                    )
                 )
             context = "\n".join(lines)
-            
+
             final_prompt = [
                 {
                     "role": "user",
@@ -664,7 +802,7 @@ class VideoKnowledgeQA:
                         f"用户问题：{question}\n\n"
                         "批次摘要：\n"
                         f"{batch_summary_text}\n\n"
-                        "关键片段列表：\n"
+                        "关键片段列表（每条含核心片段和局部上下文）：\n"
                         f"{context}\n\n"
                         "请输出JSON对象，格式为：\n"
                         '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
@@ -678,15 +816,15 @@ class VideoKnowledgeQA:
                     ),
                 }
             ]
-            
+
             parsed, final_llm_metadata = self._call_llm_json(
                 final_prompt,
                 "最终答案合成",
             )
-            
+
             final_evidence = parsed.get("evidence", []) or []
             final_answer = parsed.get("answer", "").strip() or "模型未返回有效答案。"
-            
+
             if self.logger:
                 self.logger.info(f"最终答案生成成功，包含 {len(final_evidence)} 个引用")
         except Exception as exc:
@@ -700,11 +838,12 @@ class VideoKnowledgeQA:
                     "segment_id": seg.segment_id,
                     "reason": f"该片段包含相关信息"
                 })
-        
+
         return final_answer, final_evidence, {
             "batch_synthesis": {
                 "total_segments": total_segments,
                 "batch_size": batch_size,
+                "synthesis_context_window": synthesis_context_window,
                 "total_batches": total_batches,
                 "batch_summaries": batch_summaries,
                 "batch_llm_calls": all_llm_calls,
@@ -721,6 +860,9 @@ class VideoKnowledgeQA:
         vector_score_threshold: float = 0.3,
         bm25_score_threshold: float = 15.0,
         analysis_batch_size: int = 20,
+        synthesis_context_window: int = 6,
+        synthesis_batch_trigger_count: int = 100,
+        synthesis_batch_size: int = 50,
     ) -> dict[str, Any]:
         self._ensure_client()
         if self.logger:
@@ -799,18 +941,27 @@ class VideoKnowledgeQA:
                 self.logger.info(
                     f"准备合成最终回答，使用 {len(useful_segments)} 个有用片段。"
                 )
-            
-            # 当有用段数超过 500 时，使用分批合成
-            if len(useful_segments) > 500:
+
+            # 当有用段数超过阈值时，使用分批合成
+            if len(useful_segments) > synthesis_batch_trigger_count:
                 if self.logger:
-                    self.logger.info("有用段数较多，使用分批合成策略")
+                    self.logger.info(
+                        f"有用段数较多（>{synthesis_batch_trigger_count}），使用分批合成策略，batch_size={synthesis_batch_size}"
+                    )
                 answer_text, final_evidence, synthesis_llm_metadata = self._synthesize_with_batches(
-                    question, useful_segments, batch_size=200
+                    question,
+                    useful_segments,
+                    batch_size=synthesis_batch_size,
+                    synthesis_context_window=synthesis_context_window,
                 )
             else:
                 try:
                     parsed, synthesis_llm_metadata = self._call_llm_json(
-                        self._build_synthesis_prompt(question, useful_segments),
+                        self._build_synthesis_prompt(
+                            question,
+                            useful_segments,
+                            synthesis_context_window=synthesis_context_window,
+                        ),
                         "最终答案合成",
                     )
                     final_evidence = parsed.get("evidence", []) or []
@@ -821,62 +972,79 @@ class VideoKnowledgeQA:
                     answer_text = "模型在生成最终答案时发生错误。"
                     synthesis_llm_metadata = {"success": False, "error": str(exc)}
 
-        id_to_seg = {s.segment_id: s for s in useful_segments}
-        citations = []
-        for idx, item in enumerate(final_evidence, start=1):
-            sid = item.get("segment_id")
-            seg = id_to_seg.get(sid)
-            if not seg:
-                continue
-            citations.append(
-                {
-                    "citation_id": f"#{idx}",
-                    "segment_id": sid,
-                    "source_type": seg.source_label,
-                    "quoted_text": seg.text,
-                    "video_offset": seg.hhmmss,
-                    "absolute_time": seg.absolute_time,
-                    "source_file": seg.file_path,
-                    "video_path": seg.video_path,
-                    "video_title": seg.video_title,
-                    "anchor_name": seg.anchor_name,
-                    "live_id": seg.live_id,
-                    "reason": item.get("reason", ""),
-                }
-            )
-
-        # 确保所有有用段都被引用，如果 LLM 遗漏了某些段
-        cited_segment_ids = {item.get("segment_id") for item in final_evidence if item.get("segment_id")}
-        missing_segments = [seg for seg in useful_segments if seg.segment_id not in cited_segment_ids]
-
-        if missing_segments:
-            if self.logger:
-                self.logger.warning(f"LLM 遗漏了 {len(missing_segments)} 个有用段，将自动添加到 evidence")
-            for seg in missing_segments:
-                final_evidence.append({
-                    "segment_id": seg.segment_id,
-                    "reason": f"该片段包含与问题相关的有用信息：{seg.text[:100]}..."
-                })
-                citations.append(
-                    {
-                        "citation_id": f"#{len(citations) + 1}",
-                        "segment_id": seg.segment_id,
-                        "source_type": seg.source_label,
-                        "quoted_text": seg.text,
-                        "video_offset": seg.hhmmss,
-                        "absolute_time": seg.absolute_time,
-                        "source_file": seg.file_path,
-                        "video_path": seg.video_path,
-                        "video_title": seg.video_title,
-                        "anchor_name": seg.anchor_name,
-                        "live_id": seg.live_id,
-                        "reason": f"该片段包含与问题相关的有用信息：{seg.text[:100]}...",
-                    }
-                )
+        citations, final_evidence = self._build_citations_from_evidence(final_evidence, useful_segments)
 
         if citations and "[#" not in answer_text:
             refs = " ".join(f"[#{i}]" for i in range(1, len(citations) + 1))
             answer_text = f"{answer_text} 参考引用：{refs}"
+
+        # 按直播分别整理结果
+        useful_by_video: dict[str, list[Segment]] = {}
+        for seg in useful_segments:
+            useful_by_video.setdefault(seg.live_id, []).append(seg)
+
+        video_meta: dict[str, dict[str, str]] = {}
+        for seg in self.store.segments.values():
+            if seg.live_id not in video_meta:
+                video_meta[seg.live_id] = {
+                    "live_id": seg.live_id,
+                    "video_title": seg.video_title,
+                    "anchor_name": seg.anchor_name,
+                    "video_datetime": seg.video_datetime,
+                }
+
+        video_results: list[dict[str, Any]] = []
+        for live_id, meta in sorted(video_meta.items(), key=lambda x: (x[1]["video_datetime"], x[0])):
+            video_useful = useful_by_video.get(live_id, [])
+            if not video_useful:
+                video_results.append(
+                    {
+                        **meta,
+                        "answer": "",
+                        "citations": [],
+                        "useful_segment_count": 0,
+                    }
+                )
+                continue
+            video_answer = ""
+            video_evidence: list[dict[str, Any]] = []
+            if len(video_useful) > synthesis_batch_trigger_count:
+                video_answer, video_evidence, _ = self._synthesize_with_batches(
+                    question,
+                    video_useful,
+                    batch_size=synthesis_batch_size,
+                    synthesis_context_window=synthesis_context_window,
+                )
+            else:
+                try:
+                    parsed, _ = self._call_llm_json(
+                        self._build_synthesis_prompt(
+                            question,
+                            video_useful,
+                            synthesis_context_window=synthesis_context_window,
+                        ),
+                        f"直播 {live_id} 答案合成",
+                    )
+                    video_evidence = parsed.get("evidence", []) or []
+                    video_answer = parsed.get("answer", "").strip() or ""
+                except Exception:
+                    video_answer = ""
+                    video_evidence = []
+            video_citations, video_evidence = self._build_citations_from_evidence(
+                video_evidence,
+                video_useful,
+            )
+            if video_citations and "[#" not in video_answer:
+                refs = " ".join(f"[#{i}]" for i in range(1, len(video_citations) + 1))
+                video_answer = f"{video_answer} 参考引用：{refs}".strip()
+            video_results.append(
+                {
+                    **meta,
+                    "answer": video_answer,
+                    "citations": video_citations,
+                    "useful_segment_count": len(video_useful),
+                }
+            )
 
         result = {
             "question": question,
@@ -886,6 +1054,7 @@ class VideoKnowledgeQA:
             "retrieval": stats,
             "analysis_summary": analysis_summary,
             "useful_segment_count": len(useful_segments),
+            "video_results": video_results,
             "created_at": datetime.now().isoformat(timespec="seconds"),
         }
         archive_data = {
@@ -935,4 +1104,3 @@ class VideoKnowledgeQA:
             self.client = OpenAI(api_key=self.api_key, base_url=self.api_base) if self.api_base else OpenAI(api_key=self.api_key)
         else:
             self.client = OpenAI(base_url=self.api_base) if self.api_base else OpenAI()
-

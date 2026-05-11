@@ -26,7 +26,7 @@ def setup_logger(debug: bool = False):
         logger.add(
             "kb_qa.log",
             format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {message}",
-            level="INFO",
+            level=level,
             rotation="10 MB",
             # retention="30 days"
         )
@@ -92,6 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--bm25-score-threshold", type=float, default=11.0, help="BM25检索相关性阈值")
     ask.add_argument("--context-window", type=int, default=10, help="上下文扩展窗口大小")
     ask.add_argument("--analysis-batch-size", type=int, default=100, help="逐批分析候选片段时每批的最大数量")
+    ask.add_argument("--synthesis-context-window", type=int, default=6, help="合成阶段局部上下文窗口大小")
+    ask.add_argument("--synthesis-batch-trigger-count", type=int, default=100, help="触发分批合成的有用段阈值")
+    ask.add_argument("--synthesis-batch-size", type=int, default=50, help="分批合成时每批大小")
     return p
 
 
@@ -126,6 +129,9 @@ def main() -> None:
             vector_score_threshold=args.vector_score_threshold,
             bm25_score_threshold=args.bm25_score_threshold,
             analysis_batch_size=args.analysis_batch_size,
+            synthesis_context_window=args.synthesis_context_window,
+            synthesis_batch_trigger_count=args.synthesis_batch_trigger_count,
+            synthesis_batch_size=args.synthesis_batch_size,
         )
         logger.success(f"ask命令执行完成，归档文件: {out.get('archive_path', 'N/A')}")
         return
