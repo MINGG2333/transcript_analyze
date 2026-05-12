@@ -2,12 +2,15 @@
 Index modules: SegmentStore, BM25Index, VectorIndex.
 
 VectorIndex 的 embedding 模型加载策略：
-  1. 优先尝试在线加载（正常模式）
-  2. 如果因网络不可达失败，打印提示信息，自动切换到离线模式
+  1. 先检查本地 HuggingFace 缓存，如果模型已存在，直接走离线模式（不尝试联网下载）
+  2. 如果模型不存在，做快速网络连通性检测（3s 超时）：
+     - 网络可达：在线加载
+     - 网络不可达：立即提示用户手动下载模型，不等默认的重试超时
 """
 from __future__ import annotations
 
 import os
+import socket
 import warnings
 from collections import defaultdict
 import json
@@ -22,57 +25,96 @@ from .models import Segment
 
 # ── Embedding 模型加载（带智能回退） ─────────────────────────────────────
 
-_MODEL_HELP = """
-无法从 huggingface.co 下载 embedding 模型 '{model}'（网络不可达）。
+_MODEL_CACHE_NAME = "models--" + "shibing624--text2vec-base-chinese"
+_MODEL_CACHE_DIR = Path.home() / ".cache" / "huggingface" / "hub" / _MODEL_CACHE_NAME
 
-正在自动切换到 **离线模式**……
+_MODEL_DOWNLOAD_HELP = f"""
+Embedding 模型 'shibing624/text2vec-base-chinese' 未在本地缓存中找到，
+且当前服务器无法连接到 huggingface.co（网络不可达）。
 
-如果离线模式也失败，请先在**可以访问 huggingface.co 的机器**上下载模型：
+请先在**可以访问 huggingface.co 的机器**上下载模型：
 
     pip install huggingface_hub
     huggingface-cli download shibing624/text2vec-base-chinese
 
 然后将本地缓存中的整个目录复制到服务器的以下位置：
 
-    ~/.cache/huggingface/hub/models--shibing624--text2vec-base-chinese/
+    {_MODEL_CACHE_DIR}/
 
 完成后重新运行即可。
+
+如果模型已存在于缓存中但路径不同，请检查 ~/.cache/huggingface/hub/ 目录。
 """
 
 
+def _check_hf_cache(model_name: str) -> bool:
+    """检查模型是否已在本地 HuggingFace 缓存中。"""
+    cache_name = "models--" + model_name.replace("/", "--")
+    cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / cache_name
+    return cache_dir.exists()
+
+
+def _check_network(host: str = "huggingface.co", timeout: int = 3) -> bool:
+    """快速检测网络连通性（短超时）。"""
+    try:
+        socket.create_connection((host, 443), timeout=timeout)
+        return True
+    except OSError:
+        return False
+
+
 def _create_embedding_fn(model_name: str):
-    """尝试在线加载 embedding 模型，失败时自动切换到离线模式。"""
-    for attempt, use_offline in [(1, False), (2, True)]:
-        if use_offline:
+    """加载 embedding 模型，优先使用本地缓存，避免长时间等待联网超时。"""
+    # ── 1. 如果模型已在缓存中，直接走离线模式 ──
+    if _check_hf_cache(model_name):
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        print(f"模型 '{model_name}' 已在本地缓存中，以离线模式加载...")
+        return embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=model_name
+        )
+
+    # ── 2. 模型不在缓存中，先快速检测网络 ──
+    if not _check_network():
+        print(_MODEL_DOWNLOAD_HELP)
+        raise RuntimeError(
+            f"Embedding 模型 '{model_name}' 未在本地缓存中找到，且网络不可达。\n"
+            f"请按照上方提示手动下载模型到缓存目录后重试。"
+        )
+
+    # ── 3. 网络可达，在线加载 ──
+    try:
+        return embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=model_name
+        )
+    except Exception as e:
+        err_str = str(e).lower()
+        is_network_error = (
+            "network is unreachable" in err_str
+            or "connection" in err_str
+            or "max retries" in err_str
+            or "cannot connect" in err_str
+            or "timeout" in err_str
+            or "reset" in err_str
+            or "eof" in err_str
+        )
+        if is_network_error:
+            # 在线失败 + 网络错误 → 切离线模式重试一次
             os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
             os.environ.setdefault("HF_HUB_OFFLINE", "1")
-            print(_MODEL_HELP.format(model=model_name))
-        try:
-            return embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=model_name
-            )
-        except Exception as e:
-            err_str = str(e).lower()
-            is_network_error = (
-                "network is unreachable" in err_str
-                or "connection" in err_str
-                or "max retries" in err_str
-                or "cannot connect" in err_str
-                or "timeout" in err_str
-                or "reset" in err_str
-                or "eof" in err_str
-            )
-            if not use_offline and is_network_error:
-                continue  # 第一次失败且是网络错误 → 切离线重试
-            elif not use_offline:
-                raise  # 第一次失败且非网络错误 → 直接报错
-            # 离线模式也失败了 → 提示完整信息
-            raise RuntimeError(
-                f"Embedding 模型 '{model_name}' 加载失败。\n"
-                f"在线和离线模式均尝试过。请参考上方提示手动下载模型到缓存目录。"
-            ) from e
-
-    raise RuntimeError("无法初始化 embedding 函数")  # 不应到达此处
+            print(f"在线加载失败（网络错误），切换到离线模式重试...")
+            print(f"缓存路径：{_MODEL_CACHE_DIR}")
+            try:
+                return embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name=model_name
+                )
+            except Exception as e2:
+                raise RuntimeError(
+                    f"Embedding 模型 '{model_name}' 加载失败。\n"
+                    f"在线模式和离线模式均尝试过。请参考上方提示手动下载模型到缓存目录。"
+                ) from e2
+        else:
+            raise  # 非网络错误，直接报错
 
 
 class SegmentStore:
