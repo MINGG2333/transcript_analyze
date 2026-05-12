@@ -23,7 +23,9 @@ class SegmentStore:
             return
         raw = json.loads(self.store_path.read_text(encoding="utf-8"))
         self.segments = {k: Segment.from_dict(v) for k, v in raw.get("segments", {}).items()}
-        self.by_live_source = defaultdict(list, raw.get("by_live_source", {}))
+        # 始终从 segments 重建 by_live_source 索引，确保与当前数据一致
+        # 不依赖 JSON 中可能过期或为空的历史索引数据
+        self._rebuild_live_source_index()
 
     def save(self) -> None:
         payload = {
@@ -58,18 +60,23 @@ class SegmentStore:
     def expand_context(self, segment_ids: list[str], context_window: int = 3, logger=None) -> list[Segment]:
         result: dict[str, Segment] = {}
         expansion_count = 0
+        seen_live_ids: dict[str, int] = {}
         for i, sid in enumerate(segment_ids):
             seg = self.segments.get(sid)
             if not seg:
                 continue
             key = seg.live_id
             seq = self.by_live_source.get(key, [])
+            if key not in seen_live_ids:
+                seen_live_ids[key] = len(seq)
             if not seq:
                 result[sid] = seg
                 continue
             try:
                 pos = seq.index(sid)
             except ValueError:
+                if logger:
+                    logger.warning(f"  sid={sid} 在 live_id={key} 的序列中找不到（seq长度={len(seq)}, seq前5={seq[:5]}）")
                 result[sid] = seg
                 continue
             start = max(0, pos - context_window)
@@ -80,11 +87,12 @@ class SegmentStore:
                     if near.segment_id not in result:
                         expansion_count += 1
                     result[near.segment_id] = near
-            if logger and (i + 1) % max(1, len(segment_ids) // 5) == 0:
-                logger.info(f"  扩展进度: {i + 1}/{len(segment_ids)}, 当前结果集大小: {len(result)}")
         
         if logger:
             logger.info(f"  扩展统计: 基础段数={len(segment_ids)}, 扩展后总段数={len(result)}, 新增段数={expansion_count}")
+            logger.debug("  各live_id在by_live_source中的序列长度:")
+            for live_id, seq_len in sorted(seen_live_ids.items()):
+                logger.debug(f"    live_id={live_id}: seq_len={seq_len}")
 
         ordered = sorted(
             result.values(),

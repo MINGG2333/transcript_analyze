@@ -38,6 +38,100 @@ class VideoKnowledgeQA:
         self.api_base = api_base
         self.api_key = api_key
         self.client = None
+        self.kb_description_path = kb_dir / "kb_description.txt"
+        self.kb_description: Optional[str] = None
+        self._load_kb_description()
+
+    def _generate_kb_description(self) -> str:
+        """从片段样本中生成知识库描述。"""
+        all_segments = list(self.store.segments.values())
+        if not all_segments:
+            return "未知数据库"
+        total = len(all_segments)
+
+        # ---- 统计信息 ----
+        speech_count = sum(1 for seg in all_segments if seg.source_type == "speech")
+        danmaku_count = total - speech_count
+        live_ids = sorted({seg.live_id for seg in all_segments})
+        video_count = len(live_ids)
+
+        # 仅从 speech 片段提取主播名（danmaku 的 anchor_name 是弹幕发送者ID，不是主播）
+        speech_segments = [seg for seg in all_segments if seg.source_type == "speech"]
+        anchor_names = sorted({seg.anchor_name for seg in speech_segments if seg.anchor_name})
+        streamer_name = anchor_names[0] if len(anchor_names) == 1 else (", ".join(anchor_names[:3]) + "等" if anchor_names else "未知")
+
+        # ---- 构建完整条目示例 ----
+        sample_segments = random.sample(all_segments, min(20, len(all_segments)))
+        # 按时间排序
+        sample_segments.sort(key=lambda s: (s.video_datetime or "", s.video_title or s.live_id, s.live_id, s.start_time))
+        sample_lines = ["以下是数据库中的条目示例（按时间排序）："]
+        for i, seg in enumerate(sample_segments, 1):
+            text_clean = seg.text.replace("\n", " ").strip()[:100]
+            sample_lines.append(
+                f"  [{i}] 时间={seg.video_datetime} | "
+                f"标题={seg.video_title} | "
+                f"偏移={seg.hhmmss} | "
+                f"类型={seg.source_label} | "
+                f"用户={seg.anchor_name} | "
+                f"内容={text_clean}"
+            )
+        sample_text = "\n".join(sample_lines)
+
+        # ---- 构建统计说明 ----
+        stats_text = (
+            f"数据库规模与分布：\n"
+            f"  - 总片段数：{total}\n"
+            f"  - 主播讲话片段：{speech_count}（{speech_count/total*100:.1f}%）\n"
+            f"  - 观众弹幕片段：{danmaku_count}（{danmaku_count/total*100:.1f}%）\n"
+            f"  - 直播视频数：{video_count}\n"
+            f"  - 涉及的参与者/主播（仅来自主播讲话数据）：{', '.join(anchor_names) if anchor_names else '未知'}"
+        )
+
+        prompt = [
+            {
+                "role": "user",
+                "content": (
+                    "请根据下面的信息，用一句简洁的话（20~50字）描述这个数据库的内容。\n\n"
+                    f"{stats_text}\n\n"
+                    f"数据条目示例：\n"
+                    f"{sample_text}\n\n"
+                    "请输出JSON对象：{\"description\":\"...\"}\n"
+                    # "例如：'这是一个包含主播陈嘉仪的直播回放视频的转录文本（主播讲话+观众弹幕）的数据库，共30万+条记录。'\n"
+                    "仅输出JSON，不要额外文本。"
+                ),
+            }
+        ]
+
+        # 调试：打印完整的 prompt 供检查
+        if self.logger:
+            self.logger.debug("=== 知识库描述生成完整 Prompt ===")
+            self.logger.debug(prompt[0]["content"])
+            self.logger.debug("=== 知识库描述生成 Prompt 结束 ===")
+
+        try:
+            self._ensure_client()
+            parsed, _ = self._call_llm_json(prompt, "知识库描述生成")
+            desc = (parsed.get("description") or "").strip()
+            if desc:
+                return desc
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"LLM生成知识库描述失败: {exc}")
+
+        # Fallback: 基于已知信息构建简单描述
+        name = streamer_name.replace("SNH48-", "") if streamer_name else "未知"
+        return f"这是一个包含{name}的直播回放视频的转录文本（主播讲话+观众弹幕）的数据库，共{total}条记录。"
+
+    def _load_kb_description(self) -> None:
+        """从文件加载知识库描述（仅加载，不生成）。"""
+        if self.kb_description_path.exists():
+            self.kb_description = self.kb_description_path.read_text(encoding="utf-8").strip()
+            if self.logger:
+                self.logger.info(f"已加载知识库描述: {self.kb_description[:80]}...")
+        else:
+            self.kb_description = None
+            if self.logger:
+                self.logger.info("知识库描述文件不存在，将在 build 时生成")
 
     def build_or_update(self) -> dict[str, int]:
         if self.logger:
@@ -96,6 +190,14 @@ class VideoKnowledgeQA:
             if self.logger:
                 self.logger.info("没有新的片段，无需更新索引")
 
+        # 构建完成后重新生成知识库描述
+        self.kb_description = self._generate_kb_description()
+        if not self.kb_description_path.parent.exists():
+            self.kb_description_path.parent.mkdir(parents=True, exist_ok=True)
+        self.kb_description_path.write_text(self.kb_description, encoding="utf-8")
+        if self.logger:
+            self.logger.info(f"知识库描述已更新: {self.kb_description[:80]}...")
+
         stat = {
             "parsed_segments": len(all_segments),
             "updated_segments": len(changed),
@@ -118,14 +220,20 @@ class VideoKnowledgeQA:
         max_expanded_segments: Optional[int] = None,
     ) -> tuple[list[Segment], dict[str, Any]]:
         if self.logger:
-            self.logger.info(f"[1/5] 开始从向量索引检索，top_k={vector_top_k}, score_threshold={vector_score_threshold}")
-            self.logger.debug(f"向量索引检索input: {question}")
-        vector_ids, vector_scores = self.vector.retrieve(question, top_k=vector_top_k)
+            self.logger.info("[1/6] 开始向量查询改写，辅助检索语句更聚焦语义")
+        vector_query, vector_refinement = self._refine_vector_query(question)
+        if self.logger:
+            self.logger.info(f"[1/6] 向量查询改写完成，使用查询：{vector_query}")
+
+        if self.logger:
+            self.logger.info(f"[2/6] 开始从向量索引检索，top_k={vector_top_k}, score_threshold={vector_score_threshold}")
+            self.logger.debug(f"向量索引检索input: {vector_query}")
+        vector_ids, vector_scores = self.vector.retrieve(vector_query, top_k=vector_top_k)
         # Filter by score threshold
         vector_filtered = [(sid, score) for sid, score in zip(vector_ids, vector_scores) if score >= vector_score_threshold]
         if self.logger:
-            self.logger.info(f"[1/5] 向量检索完成，得到 {len(vector_ids)} 个候选段，过滤后 {len(vector_filtered)} 个")
-            self.logger.debug("[1/5] 向量检索按相似度排序的前200条结果：")
+            self.logger.info(f"[2/6] 向量检索完成，得到 {len(vector_ids)} 个候选段，过滤后 {len(vector_filtered)} 个")
+            self.logger.debug("[2/6] 向量检索按相似度排序的前200条结果：")
             for rank, (sid, score) in enumerate(sorted(vector_filtered, key=lambda x: x[1], reverse=True)[:200], start=1):
                 seg = self.store.segments.get(sid)
                 text_snippet = seg.text.replace("\n", " ").strip() if seg else "<missing segment>"
@@ -134,19 +242,19 @@ class VideoKnowledgeQA:
                 )
 
         if self.logger:
-            self.logger.info("[2/5] 开始BM25查询改写，辅助检索语句更聚焦")
+            self.logger.info("[3/6] 开始BM25查询改写，辅助检索语句更聚焦")
         bm25_query, bm25_refinement = self._refine_bm25_query(question)
         if self.logger:
-            self.logger.info(f"[2/5] BM25查询改写完成，使用查询：{bm25_query}")
+            self.logger.info(f"[3/6] BM25查询改写完成，使用查询：{bm25_query}")
 
         if self.logger:
-            self.logger.info(f"[3/5] 开始从BM25索引检索，top_k={bm25_top_k}, score_threshold={bm25_score_threshold}")
+            self.logger.info(f"[4/6] 开始从BM25索引检索，top_k={bm25_top_k}, score_threshold={bm25_score_threshold}")
         bm25_ids, bm25_scores = self.bm25.retrieve(bm25_query, top_k=bm25_top_k)
         # Filter by score threshold
         bm25_filtered = [(sid, score) for sid, score in zip(bm25_ids, bm25_scores) if score >= bm25_score_threshold]
         if self.logger:
-            self.logger.info(f"[3/5] BM25检索完成，得到 {len(bm25_ids)} 个候选段，过滤后 {len(bm25_filtered)} 个")
-            self.logger.debug("[3/5] BM25检索按分数排序的前200条结果：")
+            self.logger.info(f"[4/6] BM25检索完成，得到 {len(bm25_ids)} 个候选段，过滤后 {len(bm25_filtered)} 个")
+            self.logger.debug("[4/6] BM25检索按分数排序的前200条结果：")
             for rank, (sid, score) in enumerate(sorted(bm25_filtered, key=lambda x: x[1], reverse=True)[:200], start=1):
                 seg = self.store.segments.get(sid)
                 text_snippet = seg.text.replace("\n", " ").strip() if seg else "<missing segment>"
@@ -155,18 +263,19 @@ class VideoKnowledgeQA:
                 )
 
         if self.logger:
-            self.logger.info(f"[4/5] 合并向量和BM25结果")
+            self.logger.info(f"[5/6] 合并向量和BM25结果")
 
         bm25_max_score = max((score for _, score in bm25_filtered), default=0.0)
         merged_dict: dict[str, dict[str, float]] = {}
 
         for index, (sid, score) in enumerate(vector_filtered):
-            merged_dict.setdefault(sid, {"vector_score": 0.0, "bm25_score": 0.0})
+            merged_dict.setdefault(sid, {"vector_score": 0.0, "bm25_score": 0.0, "source": "vector"})
             merged_dict[sid]["vector_score"] = score
             merged_dict[sid]["vector_rank"] = index + 1
 
         for index, (sid, score) in enumerate(bm25_filtered):
-            merged_dict.setdefault(sid, {"vector_score": 0.0, "bm25_score": 0.0})
+            if sid not in merged_dict:
+                merged_dict[sid] = {"vector_score": 0.0, "bm25_score": 0.0, "source": "bm25"}
             merged_dict[sid]["bm25_score"] = score
             merged_dict[sid]["bm25_rank"] = index + 1
 
@@ -175,35 +284,66 @@ class VideoKnowledgeQA:
             bm25_norm = values.get("bm25_score", 0.0)
             if bm25_max_score > 0:
                 bm25_norm = bm25_norm / bm25_max_score
-            values["combined_score"] = max(vector_norm, bm25_norm)
+            # combined_score 仅用于 BM25-only 片段的排序，向量片段保证优先保留
+            values["combined_score"] = vector_norm + bm25_norm * 0.3
 
-        merged_ids = list(merged_dict.keys())
-        raw_merged_count = len(merged_ids)
+        all_sorted = sorted(
+            merged_dict.keys(),
+            key=lambda x: merged_dict[x]["combined_score"],
+            reverse=True,
+        )
+        raw_merged_count = len(all_sorted)
         if self.logger:
-            self.logger.info(f"[4/5] 合并完成，共 {raw_merged_count} 个唯一段")
+            self.logger.info(f"[5/6] 合并完成，共 {raw_merged_count} 个唯一段")
 
-        if max_base_segments is not None and raw_merged_count > max_base_segments:
-            sorted_ids = sorted(
-                merged_ids,
-                key=lambda x: merged_dict[x]["combined_score"],
-                reverse=True,
-            )[:max_base_segments]
-            merged_ids = sorted_ids
-            if self.logger:
-                self.logger.info(f"[4/5] 基础段数超出限制，截断至 {max_base_segments}")
+        # 关键策略：向量检索结果是语义匹配的，**全部保留**。
+        # BM25 检索结果是词频匹配的（易被高频泛义词如主播名淹没），仅作为对向量结果的少量补充。
+        # 这样保证语义相关的片段不会被 BM25 的噪声冲掉。
+        vector_ids_set = {sid for sid, _ in vector_filtered}
+        merged_ids: list[str] = []
+        added: set[str] = set()
+
+        # 第一步：全部向量片段无条件保留（按 combined_score 排序）
+        for sid in all_sorted:
+            if sid in vector_ids_set and sid not in added:
+                merged_ids.append(sid)
+                added.add(sid)
+
+        # 第二步：补充 BM25 片段，但严格控制数量。
+        # 向量已找到相关片段时，BM25 仅补充少量（避免高频泛义词如主播名淹没结果）。
+        # 如果向量找到 0 条，则允许补充更多 BM25 片段兜底。
+        bm25_supplement_limit = (
+            80 if len(merged_ids) == 0          # 向量未找到：多补充一些 BM25
+            else min(30, (max_base_segments or 200) - len(merged_ids))  # 向量已找到：最多补充 30 条
+        )
+        bm25_supplement_count = 0
+        for sid in all_sorted:
+            if bm25_supplement_count >= bm25_supplement_limit:
+                break
+            if sid not in added:
+                merged_ids.append(sid)
+                added.add(sid)
+                bm25_supplement_count += 1
 
         if self.logger:
-            self.logger.info(f"[5/5] 开始上下文扩展，context_window={context_window}")
+            self.logger.info(
+                f"[5/6] 合并策略: 向量保留 {len(vector_filtered)} 个, "
+                f"BM25补充 {bm25_supplement_count} 个, "
+                f"总计 {len(merged_ids)} 个基础段"
+            )
+
+        if self.logger:
+            self.logger.info(f"[6/6] 开始上下文扩展，context_window={context_window}")
         candidates = self.store.expand_context(merged_ids, context_window=context_window, logger=self.logger)
         if self.logger:
-            self.logger.info(f"[5/5] 上下文扩展完成，得到 {len(candidates)} 个扩展后的片段")
+            self.logger.info(f"[6/6] 上下文扩展完成，得到 {len(candidates)} 个扩展后的片段")
 
         truncated = False
         if max_expanded_segments is not None and len(candidates) > max_expanded_segments:
             candidates = candidates[:max_expanded_segments]
             truncated = True
             if self.logger:
-                self.logger.info(f"[5/5] 扩展段数超出限制，截断至 {max_expanded_segments}")
+                self.logger.info(f"[6/6] 扩展段数超出限制，截断至 {max_expanded_segments}")
 
         stats = {
             "vector_hits_raw": len(vector_ids),
@@ -234,6 +374,9 @@ class VideoKnowledgeQA:
         context = "\n".join(lines)
         return (
             "你是严谨的证据型问答助手。请根据候选片段回答用户问题，不能臆造。\n"
+            "注意区分不同来源的角色：\n"
+            "- 「主播讲话」类型：内容是主播本人说的。\n"
+            "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n"
             f"用户问题：{question}\n\n"
             "候选片段：\n"
             f"{context}\n\n"
@@ -248,12 +391,30 @@ class VideoKnowledgeQA:
             "仅输出JSON，不要额外文本。"
         )
 
-    def _build_bm25_refinement_prompt(self, question: str) -> list[dict[str, str]]:
+    def _build_bm25_refinement_prompt(
+        self,
+        question: str,
+        kb_description: str,
+    ) -> list[dict[str, str]]:
         return [
             {
                 "role": "user",
                 "content": (
-                    "你是一个中文检索查询优化助手。请把下面的用户问题改写成一个或多个关键词，用于BM25检索。规则：只保留问题中的核心命名实体，去掉疑问词、助词和无关表达。若该名称由重复的单一汉字组成（如\"顺顺\"），则需同时输出该单字和完整名称。基本原则是用这些关键词搜索到的文本范围内会有问题的答案，关键词越少越好，每增加一个关键词，需要缩小搜索范围而不是扩大。\n"
+                    "你是一个专业的BM25检索关键词优化助手。请分析用户问题，"
+                    "提取能够**精准缩小搜索范围**的关键词用于 BM25 检索。\n\n"
+                    f"数据库描述：{kb_description}\n\n"
+                    "请根据上述数据库描述进行推理：如果某个关键词在整个数据库中大量出现（"
+                    "例如主播名/嘉宾名在这样的直播数据库中几乎每条片段都会提及），"
+                    "则它对缩小搜索范围几乎没有帮助，**不应该作为检索关键词**。\n\n"
+                    "规则：\n"
+                    "1) **优先选择低频率、高区分度的关键词**——即那些在数据库中不常出现、"
+                    "能有效窄化搜索范围的关键词（如特定地点、时间、事件、行为等）。\n"
+                    "2) **排除高频泛义词**——如果数据库描述表明某个词在数据库中是普遍存在的"
+                    "（如主播名），则它对缩小搜索范围几乎没有帮助，**不要将其放入关键词**。\n"
+                    "3) 聚焦问题的核心意图——提取最能代表问题核心信息的关键词，而非简单提取所有命名实体。\n"
+                    "4) 若名称由重复的单一汉字组成（如\"顺顺\"），则需同时输出该单字和完整名称。\n"
+                    "5) 最终输出的关键词组合，搜索到的结果范围应当恰好在包含答案的范围内，"
+                    "不包含大量无关内容。关键词越少越好。\n\n"
                     f"用户问题：{question}\n"
                     "请输出JSON对象：{\"refined_query\":\"...\"}。\n"
                     "仅输出JSON，不要额外文本。"
@@ -261,10 +422,78 @@ class VideoKnowledgeQA:
             }
         ]
 
+    def _build_vector_refinement_prompt(
+        self,
+        question: str,
+        kb_description: str,
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "user",
+                "content": (
+                    "你是一个专业的向量检索查询优化助手。你的任务是将用户的自然语言问题改写为"
+                    "更适合向量（语义）检索的查询文本。\n\n"
+                    f"数据库描述：{kb_description}\n\n"
+                    "请根据上述数据库描述进行推理：如果某些词（如主播名）在数据库中大量出现，"
+                    "则它们在向量空间中的嵌入可能无法有效区分不同片段。\n\n"
+                    "规则：\n"
+                    "1) **在保留核心语义的前提下，适当弱化高频泛义词的影响**——"
+                    "如果某个词在数据库中几乎每个条目中都存在，可以适当调整其表述方式"
+                    "（如将\"陈嘉仪在北舞上大学吗\"改写为\"曾在北舞上大学\"），"
+                    "使向量搜索更关注区分度高的语义成分。\n"
+                    "2) **保留问题核心意图的所有语义要素**——不要丢弃问题中的关键信息，"
+                    "只是调整表述方式，让核心概念更突出。\n"
+                    "3) **输出完整的语义句子**——不要只输出关键词，而是输出一个完整的、"
+                    "语义清晰的查询句子。\n"
+                    "4) **使用更通用的表述**——如果问题涉及特定名称但在数据库中普遍存在，"
+                    "可以用\"某人\"\"某地\"等通用表述替代，或直接聚焦核心概念。\n\n"
+                    f"用户问题：{question}\n"
+                    "请输出JSON对象：{\"refined_query\":\"...\"}。\n"
+                    "仅输出JSON，不要额外文本。"
+                ),
+            }
+        ]
+
+    def _refine_vector_query(self, question: str) -> tuple[str, dict[str, Any]]:
+        if self.logger:
+            self.logger.debug(f"向量查询改写input: {question}")
+        prompt_messages = self._build_vector_refinement_prompt(question, self.kb_description or "未知数据库")
+
+        # 调试：打印完整的 prompt 供检查
+        if self.logger:
+            self.logger.debug("=== 向量查询改写完整 Prompt ===")
+            self.logger.debug(prompt_messages[0]["content"])
+            self.logger.debug("=== 向量查询改写 Prompt 结束 ===")
+
+        try:
+            parsed, llm_metadata = self._call_llm_json(prompt_messages, "向量查询改写")
+            refined = (parsed.get("refined_query") or "").strip()
+            if not refined:
+                raise ValueError("LLM未返回 refined_query")
+            return refined, llm_metadata
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"向量查询改写失败，使用原始问题: {exc}")
+            return question, {
+                "description": "向量查询改写",
+                "success": False,
+                "error": str(exc),
+                "refined_query": question,
+                "prompt": prompt_messages[0]["content"],
+                "response": "",
+            }
+
     def _refine_bm25_query(self, question: str) -> tuple[str, dict[str, Any]]:
         if self.logger:
             self.logger.debug(f"BM25查询改写input: {question}")
-        prompt_messages = self._build_bm25_refinement_prompt(question)
+        prompt_messages = self._build_bm25_refinement_prompt(question, self.kb_description or "未知数据库")
+
+        # 调试：打印完整的 prompt 供检查
+        if self.logger:
+            self.logger.debug("=== BM25 查询改写完整 Prompt ===")
+            self.logger.debug(prompt_messages[0]["content"])
+            self.logger.debug("=== BM25 查询改写 Prompt 结束 ===")
+
         try:
             parsed, llm_metadata = self._call_llm_json(prompt_messages, "BM25 查询改写")
             refined = (parsed.get("refined_query") or "").strip()
@@ -317,8 +546,9 @@ class VideoKnowledgeQA:
                 continue
             marker = "核心片段" if sid == segment.segment_id else "上下文片段"
             local_lines.append(
-                f"  - [{marker}] ({local_seg.hhmmss}) {local_seg.text}"
+                f"  - [{marker}] ({local_seg.hhmmss}) [{local_seg.source_label}] {local_seg.text}"
             )
+
 
         local_context = "\n".join(local_lines)
         return (
@@ -333,19 +563,7 @@ class VideoKnowledgeQA:
         description: str,
         max_retries: int = 5,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """调用LLM API 并解析JSON响应，包含重试机制（指数退避）。
-
-        Args:
-            messages: 聊天消息列表
-            description: 本次调用的描述
-            max_retries: 最大重试次数，默认5次
-
-        Returns:
-            (解析后的JSON对象, LLM元数据字典)
-
-        Raises:
-            RuntimeError: 当所有重试均失败时抛出
-        """
+        """调用LLM API 并解析JSON响应，包含重试机制（指数退避）。"""
         last_raw = None
 
         for attempt in range(max_retries):
@@ -360,9 +578,8 @@ class VideoKnowledgeQA:
                     response_format={"type": "json_object"},
                 )
                 content = resp.choices[0].message.content or "{}"
-                last_raw = content  # 保存原始内容
+                last_raw = content
 
-                # 记录LLM元数据
                 llm_metadata = {
                     "model": self.llm_model,
                     "description": description,
@@ -394,7 +611,6 @@ class VideoKnowledgeQA:
                             return parsed, llm_metadata
                         except json.JSONDecodeError:
                             pass
-                    # JSON解析失败，如果还有重试机会则继续，否则抛出异常
                     if attempt < max_retries - 1:
                         wait_time = 5 ** attempt
                         if self.logger:
@@ -410,7 +626,6 @@ class VideoKnowledgeQA:
                 if self.logger:
                     self.logger.warning(f"LLM请求异常 (第 {attempt+1} 次): {e}")
 
-                # 如果还有重试机会则继续
                 if attempt < max_retries - 1:
                     wait_time = 5 ** attempt
                     if self.logger:
@@ -418,7 +633,6 @@ class VideoKnowledgeQA:
                     time.sleep(wait_time)
                     continue
                 else:
-                    # 所有重试均失败
                     error_msg = f"LLM调用在 {max_retries} 次重试后仍失败"
                     if self.logger:
                         self.logger.error(error_msg)
@@ -442,7 +656,9 @@ class VideoKnowledgeQA:
             {
                 "role": "user",
                 "content": (
-                    "你是严谨的证据分析助手。\n"
+                    "你是严谨的证据分析助手。注意区分不同来源的角色：\n"
+                    "- 「主播讲话」类型：内容是主播本人说的。\n"
+                    "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n"
                     f"用户问题：{question}\n"
                     f"这是第 {batch_index}/{total_batches} 批候选片段，请逐条判断是否与问题相关。\n"
                     "请输出JSON对象，格式为：\n"
@@ -466,7 +682,7 @@ class VideoKnowledgeQA:
         total_batches = max(1, (len(candidates) + analysis_batch_size - 1) // analysis_batch_size)
         useful_ids: set[str] = set()
         batch_stats: list[dict[str, Any]] = []
-        llm_calls: list[dict[str, Any]] = []  # 记录所有LLM调用的元数据
+        llm_calls: list[dict[str, Any]] = []
 
         for batch_index in range(total_batches):
             start = batch_index * analysis_batch_size
@@ -476,7 +692,6 @@ class VideoKnowledgeQA:
                     f"分析候选批次 {batch_index + 1}/{total_batches}，包含 {len(batch)} 个片段"
                 )
 
-            # 第一批时打印详细日志
             if batch_index == 0 and self.logger:
                 self.logger.info("=== 批次1详细信息 ===")
                 for i, seg in enumerate(batch[:min(3, len(batch))], 1):
@@ -491,7 +706,6 @@ class VideoKnowledgeQA:
                     f"候选分析 {batch_index + 1}/{total_batches}",
                 )
 
-                # 第一批时打印prompt和response
                 if batch_index == 0 and self.logger:
                     self.logger.info("=== 批次1 LLM Prompt ===")
                     self.logger.info(prompt_messages[0]["content"])
@@ -580,6 +794,9 @@ class VideoKnowledgeQA:
                 "role": "user",
                 "content": (
                     "你是严谨的证据型问答助手。请只使用下面列出的有用片段及其局部上下文回答问题，不能臆造。\n"
+                    "注意区分不同来源的角色：\n"
+                    "- 「主播讲话」类型：内容是主播本人说的。\n"
+                    "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n"
                     f"用户问题：{question}\n\n"
                     "片段列表（每条含核心片段和局部上下文）：\n"
                     f"{context}\n\n"
@@ -613,6 +830,9 @@ class VideoKnowledgeQA:
                 "role": "user",
                 "content": (
                     "你是严谨的证据型问答助手。请根据下面的片段及其局部上下文总结与问题相关的关键信息。\n"
+                    "注意区分不同来源的角色：\n"
+                    "- 「主播讲话」类型：内容是主播本人说的。\n"
+                    "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n"
                     f"用户问题：{question}\n"
                     f"这是第 {batch_index}/{total_batches} 批片段。\n\n"
                     "片段列表（每条含核心片段和局部上下文）：\n"
@@ -708,7 +928,6 @@ class VideoKnowledgeQA:
         key_segment_ids: set[str] = set()
         all_llm_calls: list[dict[str, Any]] = []
 
-        # 第一阶段：对每批片段进行合成
         for batch_idx in range(total_batches):
             start = batch_idx * batch_size
             end = min(start + batch_size, total_segments)
@@ -762,15 +981,12 @@ class VideoKnowledgeQA:
                     "success": False,
                     "error": str(exc),
                 })
-                # 如果合成失败，将此批所有段作为关键段保留
                 for seg in batch:
                     key_segment_ids.add(seg.segment_id)
 
-        # 第二阶段：基于所有批次的合成，生成最终答案
         if self.logger:
             self.logger.info(f"第一阶段合成完成，提取了 {len(key_segment_ids)} 个关键段，准备生成最终答案")
 
-        # 选出关键段及所有段（确保完整性）
         key_segments = [seg for seg in useful_segments if seg.segment_id in key_segment_ids]
 
         final_evidence: list[dict[str, Any]] = []
@@ -778,7 +994,6 @@ class VideoKnowledgeQA:
         final_llm_metadata = {}
 
         try:
-            # 构建最终合成 prompt，包含批次摘要和关键段
             batch_summary_text = "\n".join([
                 f"[第{s['batch_index']}批] {s['summary']}"
                 for s in batch_summaries
@@ -799,6 +1014,9 @@ class VideoKnowledgeQA:
                     "role": "user",
                     "content": (
                         "你是严谨的证据型问答助手。基于下面的批次摘要和关键片段，生成一个全面的最终答案。\n"
+                        "注意区分不同来源的角色：\n"
+                        "- 「主播讲话」类型：内容是主播本人说的。\n"
+                        "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n"
                         f"用户问题：{question}\n\n"
                         "批次摘要：\n"
                         f"{batch_summary_text}\n\n"
@@ -832,7 +1050,6 @@ class VideoKnowledgeQA:
                 self.logger.error(f"最终答案合成失败: {exc}")
             final_answer = "模型在生成最终答案时发生错误。"
             final_llm_metadata = {"success": False, "error": str(exc)}
-            # 如果最终合成失败，将所有关键段作为 evidence
             for seg in key_segments:
                 final_evidence.append({
                     "segment_id": seg.segment_id,
@@ -876,8 +1093,8 @@ class VideoKnowledgeQA:
             context_window,
             vector_score_threshold=vector_score_threshold,
             bm25_score_threshold=bm25_score_threshold,
-            max_base_segments=None,  # 不限制基础段数
-            max_expanded_segments=None,  # 不限制扩展段数
+            max_base_segments=200,
+            max_expanded_segments=300,
         )
         if self.logger:
             self.logger.info(
@@ -942,7 +1159,6 @@ class VideoKnowledgeQA:
                     f"准备合成最终回答，使用 {len(useful_segments)} 个有用片段。"
                 )
 
-            # 当有用段数超过阈值时，使用分批合成
             if len(useful_segments) > synthesis_batch_trigger_count:
                 if self.logger:
                     self.logger.info(
@@ -978,7 +1194,6 @@ class VideoKnowledgeQA:
             refs = " ".join(f"[#{i}]" for i in range(1, len(citations) + 1))
             answer_text = f"{answer_text} 参考引用：{refs}"
 
-        # 按直播分别整理结果
         useful_by_video: dict[str, list[Segment]] = {}
         for seg in useful_segments:
             useful_by_video.setdefault(seg.live_id, []).append(seg)
