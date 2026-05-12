@@ -3,4 +3,5 @@ sentence-transformers
 openai
 rank-bm25
 loguru
+numpy<2.0.0
 
