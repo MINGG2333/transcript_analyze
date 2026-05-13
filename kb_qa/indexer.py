@@ -9,6 +9,7 @@ VectorIndex 的 embedding 模型加载策略：
 """
 from __future__ import annotations
 
+import gc
 import os
 import socket
 import warnings
@@ -248,6 +249,9 @@ class VectorIndex:
                     for x in batch
                 ],
             )
+            # 每批处理后释放 batch 对象，防止内存累积
+            del batch
+            gc.collect()
             if logger:
                 processed = min(i + batch_size, total)
                 progress_pct = (processed * 100) // total

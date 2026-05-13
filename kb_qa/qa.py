@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from datetime import datetime
 import json
 from pathlib import Path
@@ -34,13 +35,24 @@ class VideoKnowledgeQA:
         self.store = SegmentStore(kb_dir / "segment_store.json")
         self.store.load()
         self.vector = VectorIndex(kb_dir / "chroma_db", embedding_model=embedding_model)
-        self.bm25 = BM25Index(self.store.segments)
+        # BM25 延迟加载：构建时仅在 upsert 后重建，问答时通过 get_bm25() 惰性获取
+        self._bm25: Optional[BM25Index] = None
         self.api_base = api_base
         self.api_key = api_key
         self.client = None
         self.kb_description_path = kb_dir / "kb_description.txt"
         self.kb_description: Optional[str] = None
         self._load_kb_description()
+
+    def get_bm25(self) -> BM25Index:
+        """惰性获取 BM25 索引，仅在首次调用时构建。"""
+        if self._bm25 is None:
+            if self.logger:
+                self.logger.info("BM25索引未就绪，首次构建（惰性加载）...")
+            self._bm25 = BM25Index(self.store.segments)
+            if self.logger:
+                self.logger.info("BM25索引构建完成")
+        return self._bm25
 
     def _generate_kb_description(self) -> str:
         """从片段样本中生成知识库描述。"""
@@ -141,8 +153,9 @@ class VideoKnowledgeQA:
             self.logger.info(f"知识库目录: {self.kb_dir}")
 
         all_segments = list(collect_segments(self.records_path, self.subtitle_root))
+        parsed_count = len(all_segments)
         if self.logger:
-            self.logger.info(f"解析得到 {len(all_segments)} 个片段")
+            self.logger.info(f"解析得到 {parsed_count} 个片段")
 
             # 动态统计不同类型的片段
             participant_types = {}
@@ -178,6 +191,11 @@ class VideoKnowledgeQA:
         if changed:
             if self.logger:
                 self.logger.info("开始更新向量索引（这可能需要几分钟，请耐心等待...）")
+            # 释放解析结果的内存，让向量索引过程有更多可用内存
+            del all_segments
+            gc.collect()
+            if self.logger:
+                self.logger.info("已释放解析结果内存")
             self.vector.upsert(changed, logger=self.logger)
             if self.logger:
                 self.logger.info("开始保存片段存储")
@@ -185,7 +203,9 @@ class VideoKnowledgeQA:
             if self.logger:
                 self.logger.success("片段存储保存完成")
                 self.logger.info("重建BM25索引")
-            self.bm25 = BM25Index(self.store.segments)
+            self._bm25 = BM25Index(self.store.segments)
+            # 重建后回收一次
+            gc.collect()
         else:
             if self.logger:
                 self.logger.info("没有新的片段，无需更新索引")
@@ -199,7 +219,7 @@ class VideoKnowledgeQA:
             self.logger.info(f"知识库描述已更新: {self.kb_description[:80]}...")
 
         stat = {
-            "parsed_segments": len(all_segments),
+            "parsed_segments": parsed_count,
             "updated_segments": len(changed),
             "total_segments": len(self.store.segments),
         }
@@ -249,7 +269,7 @@ class VideoKnowledgeQA:
 
         if self.logger:
             self.logger.info(f"[4/6] 开始从BM25索引检索，top_k={bm25_top_k}, score_threshold={bm25_score_threshold}")
-        bm25_ids, bm25_scores = self.bm25.retrieve(bm25_query, top_k=bm25_top_k)
+        bm25_ids, bm25_scores = self.get_bm25().retrieve(bm25_query, top_k=bm25_top_k)
         # Filter by score threshold
         bm25_filtered = [(sid, score) for sid, score in zip(bm25_ids, bm25_scores) if score >= bm25_score_threshold]
         if self.logger:

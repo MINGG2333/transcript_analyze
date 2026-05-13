@@ -7,6 +7,11 @@ import hashlib
 
 @dataclass
 class Segment:
+    __slots__ = (
+        "segment_id", "text", "start_time", "end_time",
+        "source_type", "file_path", "video_path", "video_title",
+        "anchor_name", "live_id", "video_datetime",
+    )
     segment_id: str
     text: str
     start_time: float
