@@ -2,5 +2,8 @@ __pycache__/
 
 download_records.json
 pocket48_downloads/
+firered_output_batch/
+
 video_knowledge_db*/
+
 *.log
