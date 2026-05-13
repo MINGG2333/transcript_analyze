@@ -1167,46 +1167,70 @@ class VideoKnowledgeQA:
                 f"分析完成: useful_segments={analysis_summary['useful_segment_count']} / {analysis_summary['total_candidates']}"
             )
 
+        if not useful_segments:
+            if self.logger:
+                self.logger.info("未找到有用片段，快速返回结果。")
+            result = {
+                "question": question,
+                "answer": "未找到与问题直接相关的片段，无法给出确定答案。",
+                "citations": [],
+                "retrieved_count": len(candidates),
+                "retrieval": stats,
+                "analysis_summary": analysis_summary,
+                "useful_segment_count": 0,
+                "video_results": [],
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            archive_data = {
+                **result,
+                "retrieval_segments": retrieval_segments,
+                "analysis": analysis,
+                "useful_segments": [],
+                "llm_calls": {
+                    "analysis_batches": analysis_llm_calls,
+                    "synthesis": {"description": "skip_synthesis_no_useful_segments"},
+                },
+            }
+            archive_path = self._archive(archive_data)
+            result["archive_path"] = str(archive_path)
+            return result
+
         final_evidence: list[dict[str, Any]] = []
         answer_text = ""
         synthesis_llm_metadata: dict[str, Any] = {}
-        if not useful_segments:
-            answer_text = "未找到与问题直接相关的片段，无法给出确定答案。"
-            synthesis_llm_metadata = {"description": "skip_synthesis_no_useful_segments"}
-        else:
+        if self.logger:
+            self.logger.info(
+                f"准备合成最终回答，使用 {len(useful_segments)} 个有用片段。"
+            )
+
+        if len(useful_segments) > synthesis_batch_trigger_count:
             if self.logger:
                 self.logger.info(
-                    f"准备合成最终回答，使用 {len(useful_segments)} 个有用片段。"
+                    f"有用段数较多（>{synthesis_batch_trigger_count}），使用分批合成策略，batch_size={synthesis_batch_size}"
                 )
-
-            if len(useful_segments) > synthesis_batch_trigger_count:
+            answer_text, final_evidence, synthesis_llm_metadata = self._synthesize_with_batches(
+                question,
+                useful_segments,
+                batch_size=synthesis_batch_size,
+                synthesis_context_window=synthesis_context_window,
+            )
+        else:
+            try:
+                parsed, synthesis_llm_metadata = self._call_llm_json(
+                    self._build_synthesis_prompt(
+                        question,
+                        useful_segments,
+                        synthesis_context_window=synthesis_context_window,
+                    ),
+                    "最终答案合成",
+                )
+                final_evidence = parsed.get("evidence", []) or []
+                answer_text = parsed.get("answer", "").strip() or "模型未返回有效答案。"
+            except Exception as exc:
                 if self.logger:
-                    self.logger.info(
-                        f"有用段数较多（>{synthesis_batch_trigger_count}），使用分批合成策略，batch_size={synthesis_batch_size}"
-                    )
-                answer_text, final_evidence, synthesis_llm_metadata = self._synthesize_with_batches(
-                    question,
-                    useful_segments,
-                    batch_size=synthesis_batch_size,
-                    synthesis_context_window=synthesis_context_window,
-                )
-            else:
-                try:
-                    parsed, synthesis_llm_metadata = self._call_llm_json(
-                        self._build_synthesis_prompt(
-                            question,
-                            useful_segments,
-                            synthesis_context_window=synthesis_context_window,
-                        ),
-                        "最终答案合成",
-                    )
-                    final_evidence = parsed.get("evidence", []) or []
-                    answer_text = parsed.get("answer", "").strip() or "模型未返回有效答案。"
-                except Exception as exc:
-                    if self.logger:
-                        self.logger.error(f"最终答案合成失败: {exc}")
-                    answer_text = "模型在生成最终答案时发生错误。"
-                    synthesis_llm_metadata = {"success": False, "error": str(exc)}
+                    self.logger.error(f"最终答案合成失败: {exc}")
+                answer_text = "模型在生成最终答案时发生错误。"
+                synthesis_llm_metadata = {"success": False, "error": str(exc)}
 
         citations, final_evidence = self._build_citations_from_evidence(final_evidence, useful_segments)
 
