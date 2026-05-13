@@ -75,6 +75,29 @@ free -h
 swapon --show
 # 持久化到 /etc/fstab（可选，重启后也生效）
 echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+
+# 将 swap 从 2GB 改为 12GB
+# 1. 关闭现有 swap
+swapoff /swapfile
+
+# 2. 删除旧的 2GB swap 文件
+rm -f /swapfile
+
+# 3. 创建 12GB 的新 swap 文件（12 × 1024 = 12288）
+dd if=/dev/zero of=/swapfile bs=1M count=12288 status=progress
+
+# 4. 设置权限
+chmod 600 /swapfile
+
+# 5. 格式化为 swap
+mkswap /swapfile
+
+# 6. 启用 swap
+swapon /swapfile
+
+# 7. 验证是否生效
+free -h
+swapon --show
 ```
 
 ### 2. 测试命令
