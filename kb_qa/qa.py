@@ -566,7 +566,7 @@ class VideoKnowledgeQA:
                 continue
             marker = "核心片段" if sid == segment.segment_id else "上下文片段"
             local_lines.append(
-                f"  - [{marker}] ({local_seg.hhmmss}) [{local_seg.source_label}] {local_seg.text}"
+                f"  - [{marker}] ({local_seg.hhmmss}) [{local_seg.source_label}] 用户名={local_seg.anchor_name}; {local_seg.text}"
             )
 
 
