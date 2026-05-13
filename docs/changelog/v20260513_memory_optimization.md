@@ -65,10 +65,15 @@
 
 ### 1. 创建 2GB swap 文件（最有效）
 ```bash
+# 创建 2GB swap 文件
 dd if=/dev/zero of=/swapfile bs=1M count=2048 status=progress
 chmod 600 /swapfile
 mkswap /swapfile
 swapon /swapfile
+# 验证是否生效
+free -h
+swapon --show
+# 持久化到 /etc/fstab（可选，重启后也生效）
 echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
 ```
 
