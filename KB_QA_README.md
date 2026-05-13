@@ -9,10 +9,14 @@ python -m pip install -r requirements_kb_qa.txt
 ## 2) 构建知识库（可重复执行，支持增量）
 
 ```bash
+cp /mnt/zhitainew/snh48/download_records.json ./
+cp -r /mnt/zhitainew/snh48/firered_output_batch ./
+
 python run_kb_qa.py \
   --records download_records.json \
   --subtitle-root firered_output_batch \
   --kb-dir video_knowledge_db \
+  --debug \
   build
 ```
 说明：以上命令行在当前目录（`transcript_analyze/`）下执行，`download_records.json`、`firered_output_batch`、`video_knowledge_db` 均位于此目录中。
@@ -49,8 +53,9 @@ python run_kb_qa.py \
   --records download_records.json \
   --subtitle-root firered_output_batch \
   --kb-dir video_knowledge_db \
+  --debug \
   ask \
-  --question "我想知道视频中的人在哪些时候提到了养的宠物狗顺顺，请按时间顺序列出"
+  --question "陈嘉仪和北舞的关联是什么？"
 ```
 说明：如果不传 `--records`、`--subtitle-root`、`--kb-dir`，默认值指向当前目录（`transcript_analyze/`）下的同名文件/目录：
 
