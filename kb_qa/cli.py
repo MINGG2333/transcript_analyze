@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from .qa import VideoKnowledgeQA
 
 # ── Script directory detection ──────────────────────────────────────────────
@@ -106,6 +108,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # ── 自动加载 .env 文件 ──────────────────────────────────────────────
+    # 从当前目录向上查找 .env，支持 snh48_web/.env
+    env_loaded = load_dotenv(override=False)
+    if not env_loaded:
+        # 如果当前目录没找到，尝试从脚本所在项目的根目录加载
+        project_root = _SCRIPT_DIR.parent  # transcript_analyze/.. => snh48_web/
+        env_loaded = load_dotenv(project_root / ".env", override=False)
+
     args = build_parser().parse_args()
     logger = setup_logger(debug=args.debug)
     qa = VideoKnowledgeQA(
