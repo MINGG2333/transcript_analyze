@@ -8,6 +8,13 @@ from pathlib import Path
 
 from .qa import VideoKnowledgeQA
 
+# ── Script directory detection ──────────────────────────────────────────────
+# 将默认数据文件/目录解析到 transcript_analyze/ 目录下
+_SCRIPT_DIR = Path(__file__).resolve().parent.parent
+_DEFAULT_RECORDS = str(_SCRIPT_DIR / "download_records.json")
+_DEFAULT_SUBTITLE_ROOT = str(_SCRIPT_DIR / "firered_output_batch")
+_DEFAULT_KB_DIR = str(_SCRIPT_DIR / "video_knowledge_db")
+
 
 def setup_logger(debug: bool = False):
     """设置日志系统，使用loguru或回退到简单日志"""
@@ -72,9 +79,9 @@ def setup_logger(debug: bool = False):
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="直播视频知识库问答系统")
-    p.add_argument("--records", default="download_records.json", help="下载记录JSON路径")
-    p.add_argument("--subtitle-root", default="firered_output_batch", help="字幕输出根目录")
-    p.add_argument("--kb-dir", default="video_knowledge_db", help="知识库持久化目录")
+    p.add_argument("--records", default=_DEFAULT_RECORDS, help="下载记录JSON路径")
+    p.add_argument("--subtitle-root", default=_DEFAULT_SUBTITLE_ROOT, help="字幕输出根目录")
+    p.add_argument("--kb-dir", default=_DEFAULT_KB_DIR, help="知识库持久化目录")
     p.add_argument("--embedding-model", default="shibing624/text2vec-base-chinese", help="向量模型")
     p.add_argument("--llm-model", default="deepseek-v4-flash", help="问答LLM模型名")
     p.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")

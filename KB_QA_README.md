@@ -15,6 +15,13 @@ python run_kb_qa.py \
   --kb-dir video_knowledge_db \
   build
 ```
+说明：以上命令行在当前目录（`transcript_analyze/`）下执行，`download_records.json`、`firered_output_batch`、`video_knowledge_db` 均位于此目录中。
+也可以省略 `--records`、`--subtitle-root`、`--kb-dir` 参数，使用默认值：
+
+```bash
+python run_kb_qa.py build
+```
+
 ```bash
 # for the first run
 ~/miniconda3/envs/koudai48/lib/python3.9/site-packages/requests/__init__.py:86: RequestsDependencyWarning: Unable to find acceptable character detection dependency (chardet or charset_normalizer).
@@ -45,6 +52,11 @@ python run_kb_qa.py \
   ask \
   --question "我想知道视频中的人在哪些时候提到了养的宠物狗顺顺，请按时间顺序列出"
 ```
+说明：如果不传 `--records`、`--subtitle-root`、`--kb-dir`，默认值指向当前目录（`transcript_analyze/`）下的同名文件/目录：
+
+```bash
+python run_kb_qa.py ask --question "我想知道视频中的人在哪些时候提到了养的宠物狗顺顺，请按时间顺序列出"
+```
 
 ## 4) 环境变量
 
@@ -56,4 +68,3 @@ python run_kb_qa.py \
 - `video_knowledge_db/chroma_db`：向量数据库
 - `video_knowledge_db/segment_store.json`：完整片段及上下文索引
 - `video_knowledge_db/qa_archive/*.json`：每次问答归档（问题、答案、引用列表）
-
