@@ -1,6 +1,6 @@
 chromadb
 sentence-transformers
-openai
+openai>=2
 rank-bm25
 loguru
 numpy<2.0.0
