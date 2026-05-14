@@ -360,6 +360,27 @@ class VideoKnowledgeQA:
 
         truncated = False
         if max_expanded_segments is not None and len(candidates) > max_expanded_segments:
+            # 截断前记录前30个候选片段的详细信息（含分数明细）
+            if self.logger:
+                merged_ids_set = set(merged_ids)
+                self.logger.debug("=== 截断前候选片段详情（前30个）===")
+                for idx, seg in enumerate(candidates[:30], start=1):
+                    base_info = merged_dict.get(seg.segment_id, {})
+                    text_snippet = seg.text.replace("\n", " ").strip()[:80]
+                    is_base = "基段" if seg.segment_id in merged_ids_set else "上下文扩展"
+                    self.logger.debug(
+                        f"  {idx:02d}. id={seg.segment_id} | "
+                        f"来源={is_base} | "
+                        f"类型={seg.source_label} | "
+                        f"视频={seg.video_title} | "
+                        f"偏移={seg.hhmmss} | "
+                        f"vector={base_info.get('vector_score', 'N/A')} | "
+                        f"bm25={base_info.get('bm25_score', 'N/A')} | "
+                        f"combined={base_info.get('combined_score', 'N/A')} | "
+                        f"内容={text_snippet!r}"
+                    )
+                self.logger.debug("=== 截断前候选片段详情结束 ===")
+
             candidates = candidates[:max_expanded_segments]
             truncated = True
             if self.logger:
