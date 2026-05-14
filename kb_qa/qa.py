@@ -540,20 +540,10 @@ class VideoKnowledgeQA:
             }
 
     def _build_kb_background_text(self) -> str:
-        """构建知识库背景和常识说明，供分析/合成提示使用。"""
-        bg_parts = []
+        """构建知识库背景说明，供分析/合成提示使用。"""
         if self.kb_description:
-            bg_parts.append(f"【数据库背景】{self.kb_description}")
-        bg_parts.append(
-            "【背景常识】SNH48是一个全女子偶像团体，所有成员均为女性。"
-            "因此，该数据库的主播陈嘉仪是一名女性偶像。"
-        )
-        bg_parts.append(
-            "【立场要求】请你站在喜欢这位主播的粉丝角度回答问题，"
-            "注意保护主播的正面形象，避免给出可能对主播造成负面影响的回答。"
-            "当遇到主播的某些表述可能被误解时，应当用粉丝的视角善意地解释。"
-        )
-        return "\n".join(bg_parts)
+            return f"【数据库背景】{self.kb_description}"
+        return ""
 
     def _format_segment_with_local_context(
         self,
@@ -697,15 +687,9 @@ class VideoKnowledgeQA:
             )
         context = "\n".join(lines)
 
-        # 构建背景知识段落（如果知识库描述可用）
-        bg_parts = []
+        bg_text = ""
         if kb_description:
-            bg_parts.append(f"【数据库背景】{kb_description}")
-        bg_parts.append(
-            "【背景常识】SNH48是一个全女子偶像团体，所有成员均为女性。"
-            "因此，该数据库的主播陈嘉仪是一名女性偶像。"
-        )
-        bg_text = "\n".join(bg_parts)
+            bg_text = f"【数据库背景】{kb_description}"
 
         return [
             {
@@ -720,11 +704,18 @@ class VideoKnowledgeQA:
                     "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
                     "  • 请将你的判断写入每条有用片段的 reason 字段，注明「主播自述」或「主播转述」。\n\n"
                     f"{bg_text}\n\n"
-                    "⚠️ 高级推理指导——如何检测「矛盾性转述」：\n"
-                    "  • 结合背景常识判断：如果主播讲的话与已知事实（如SNH48成员为女性）明显矛盾，"
-                    "这极大概率是主播在**重复/转述/调侃弹幕内容**或**开玩笑**，而非主播的真实自述。\n"
-                    "  • 例如：来自SNH48的女性主播说\"我是男生\"，这显然是转述弹幕或玩笑，不能作为真实证据。\n"
-                    "  • 请将此类推理写入 reason 字段，注明「可能为转述/玩梗」。\n\n"
+                    "🧠 通用推理原则：\n"
+                    "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），"
+                    "结合片段上下文来判断主播话语的真实含义。\n"
+                    "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），"
+                    "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
+                    "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
+                    "4) 请在 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
+                    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以标记为 useful。\n\n"
+                    "🔑 重要：片段元数据（如「用户名」字段中标注的组织团体前缀格式）本身也是有效的证据信息。"
+                    "对于询问身份的问题，如果用户名中明确标注了提问对象的身份信息，"
+                    "则该片段可以直接用作回答该问题的证据，因为用户名本身就是对提问对象的身份说明。"
+                    "即使片段的文字内容是日常闲聊，其元数据信息仍可用于回答问题。\n\n"
                     f"用户问题：{question}\n"
                     f"这是第 {batch_index}/{total_batches} 批候选片段，请逐条判断是否与问题相关。\n"
                     "请输出JSON对象，格式为：\n"
@@ -861,7 +852,7 @@ class VideoKnowledgeQA:
             {
                 "role": "user",
                 "content": (
-                    "你是严谨的证据型问答助手。请根据下面列出的有用片段及其局部上下文回答问题。\n"
+                    "你是一名熟知这名主播的粉丝，现在请根据下面提供的直播片段及其局部上下文来回答问题。\n\n"
                     "注意区分不同来源的角色：\n"
                     "- 「主播讲话」类型：内容是主播本人说的，但主播可能在说话中**引用/转述他人话语**，需要结合上下文分辨。\n"
                     "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n\n"
@@ -871,23 +862,29 @@ class VideoKnowledgeQA:
                     "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
                     "  • 请在 evidence 的 reason 字段中注明每段内容是「主播自述」还是「主播转述」。\n\n"
                     f"{bg_text}\n\n"
-                    "⚠️ 高级推理指导——如何检测「矛盾性转述」：\n"
-                    "  • 结合背景常识判断：如果主播讲的话与已知事实（如SNH48成员为女性）明显矛盾，"
-                    "这极大概率是主播在**重复/转述/调侃弹幕内容**或**开玩笑**，而非主播的真实自述。\n"
-                    "  • 例如：来自SNH48的女性主播说\"我是男生\"，这显然是转述弹幕或玩笑，不能作为真实证据。\n"
-                    "  • 请将此类推理写入 reason 字段，注明「可能为转述/玩梗」。\n\n"
+                    "🧠 通用推理原则：\n"
+                    "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），"
+                    "结合片段上下文来判断主播话语的真实含义。\n"
+                    "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），"
+                    "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
+                    "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
+                    "4) 请在 evidence 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
+                    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为证据。\n\n"
+                    "💬 回答风格要求：\n"
+                    "请用自然、亲切的口吻回答，就像在跟朋友介绍一样。在提到片段的证据时，用 [#1]、[#2] 这样的标记引用对应的证据条目。\n"
+                    "不需要在回答末尾列出所有引用的编号，只需要在回答中自然地插入引用标记即可。\n"
+                    "例如：\"根据片段中的账号名 [#1]，陈嘉仪是SNH48的成员。\"\n\n"
                     f"用户问题：{question}\n\n"
                     "片段列表（每条含核心片段和局部上下文）：\n"
                     f"{context}\n\n"
                     "请输出JSON对象，格式为：\n"
                     '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
                     "要求：\n"
-                    "1) answer字段中必须引用所有有用片段，使用 [#1]、[#2] 等标记对应 evidence 条目；\n"
-                    "2) evidence必须包含所有有用segment_id，按时间顺序排列；\n"
-                    "3) 每个evidence条目必须说明该片段如何支持答案，并注明是「主播自述」还是「主播转述」；\n"
-                    "4) 如果片段很多，answer要全面总结所有相关信息；\n"
-                    "5) 不要遗漏任何有用片段的引用。\n"
-                    "仅输出JSON，不要额外文本。"
+                    "1) answer用自然的语言回答，在引用证据时插入 [#N] 标记；\n"
+                    "2) evidence仅包含那些**确实为答案提供了独特信息**的片段，如果多个片段提供的是重复信息，只保留最具代表性的一个即可；\n"
+                    "3) 每个evidence条目说明该片段如何支持答案，并注明是「主播自述」还是「主播转述」；\n"
+                    "4) evidence列表按时间顺序排列；\n"
+                    "5) 仅输出JSON，不要额外文本。"
                 ),
             }
         ]
@@ -909,7 +906,7 @@ class VideoKnowledgeQA:
             {
                 "role": "user",
                 "content": (
-                    "你是严谨的证据型问答助手。请根据下面的片段及其局部上下文总结与问题相关的关键信息。\n"
+                    "你是一名熟知这名主播的粉丝，请根据下面的片段及其局部上下文总结与问题相关的关键信息。\n"
                     "注意区分不同来源的角色：\n"
                     "- 「主播讲话」类型：内容是主播本人说的，但主播可能在说话中**引用/转述他人话语**，需要结合上下文分辨。\n"
                     "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n\n"
@@ -919,11 +916,14 @@ class VideoKnowledgeQA:
                     "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
                     "  • 请在 key_segments 的 reason 字段中注明每段是「主播自述」还是「主播转述」。\n\n"
                     f"{bg_text}\n\n"
-                    "⚠️ 高级推理指导——如何检测「矛盾性转述」：\n"
-                    "  • 结合背景常识判断：如果主播讲的话与已知事实（如SNH48成员为女性）明显矛盾，"
-                    "这极大概率是主播在**重复/转述/调侃弹幕内容**或**开玩笑**，而非主播的真实自述。\n"
-                    "  • 例如：来自SNH48的女性主播说\"我是男生\"，这显然是转述弹幕或玩笑，不能作为真实证据。\n"
-                    "  • 请将此类推理写入 reason 字段，注明「可能为转述/玩梗」。\n\n"
+                    "🧠 通用推理原则：\n"
+                    "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），"
+                    "结合片段上下文来判断主播话语的真实含义。\n"
+                    "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），"
+                    "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
+                    "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
+                    "4) 请在 key_segments 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
+                    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为关键段。\n\n"
                     f"用户问题：{question}\n"
                     f"这是第 {batch_index}/{total_batches} 批片段。\n\n"
                     "片段列表（每条含核心片段和局部上下文）：\n"
@@ -966,35 +966,6 @@ class VideoKnowledgeQA:
                     "anchor_name": seg.anchor_name,
                     "live_id": seg.live_id,
                     "reason": item.get("reason", ""),
-                }
-            )
-
-        cited_segment_ids = {item.get("segment_id") for item in normalized_evidence if item.get("segment_id")}
-        missing_segments = [seg for seg in useful_segments if seg.segment_id not in cited_segment_ids]
-        if missing_segments and self.logger:
-            self.logger.warning(f"LLM 遗漏了 {len(missing_segments)} 个有用段，将自动添加到 evidence")
-        for seg in missing_segments:
-            reason = f"该片段包含与问题相关的有用信息：{seg.text[:100]}..."
-            normalized_evidence.append(
-                {
-                    "segment_id": seg.segment_id,
-                    "reason": reason,
-                }
-            )
-            citations.append(
-                {
-                    "citation_id": f"#{len(citations) + 1}",
-                    "segment_id": seg.segment_id,
-                    "source_type": seg.source_label,
-                    "quoted_text": seg.text,
-                    "video_offset": seg.hhmmss,
-                    "absolute_time": seg.absolute_time,
-                    "source_file": seg.file_path,
-                    "video_path": seg.video_path,
-                    "video_title": seg.video_title,
-                    "anchor_name": seg.anchor_name,
-                    "live_id": seg.live_id,
-                    "reason": reason,
                 }
             )
         return citations, normalized_evidence
@@ -1105,7 +1076,7 @@ class VideoKnowledgeQA:
                 {
                     "role": "user",
                     "content": (
-                        "你是严谨的证据型问答助手。基于下面的批次摘要和关键片段，生成一个全面的最终答案。\n"
+                        "你是一名熟知这名主播的粉丝，基于下面的批次摘要和关键片段，生成一个全面的最终答案。\n"
                         "注意区分不同来源的角色：\n"
                         "- 「主播讲话」类型：内容是主播本人说的，但主播可能在说话中**引用/转述他人话语**，需要结合上下文分辨。\n"
                         "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n\n"
@@ -1115,11 +1086,16 @@ class VideoKnowledgeQA:
                         "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
                         "  • 请在 evidence 的 reason 字段中注明每段内容是「主播自述」还是「主播转述」。\n\n"
                         f"{bg_text}\n\n"
-                        "⚠️ 高级推理指导——如何检测「矛盾性转述」：\n"
-                        "  • 结合背景常识判断：如果主播讲的话与已知事实（如SNH48成员为女性）明显矛盾，"
-                        "这极大概率是主播在**重复/转述/调侃弹幕内容**或**开玩笑**，而非主播的真实自述。\n"
-                        "  • 例如：来自SNH48的女性主播说\"我是男生\"，这显然是转述弹幕或玩笑，不能作为真实证据。\n"
-                        "  • 请将此类推理写入 reason 字段，注明「可能为转述/玩梗」。\n\n"
+                        "🧠 通用推理原则：\n"
+                        "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），"
+                        "结合片段上下文来判断主播话语的真实含义。\n"
+                        "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），"
+                        "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
+                        "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
+                        "4) 请在 evidence 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n\n"
+                        " 回答风格要求：\n"
+                        "请用自然、亲切的口吻回答，就像在跟朋友介绍一样。在提到片段的证据时，用 [#1]、[#2] 这样的标记引用对应的证据条目。\n"
+                        "不需要在回答末尾列出所有引用的编号，只需要在回答中自然地插入引用标记即可。\n\n"
                         f"用户问题：{question}\n\n"
                         "批次摘要：\n"
                         f"{batch_summary_text}\n\n"
@@ -1317,10 +1293,6 @@ class VideoKnowledgeQA:
 
         citations, final_evidence = self._build_citations_from_evidence(final_evidence, useful_segments)
 
-        if citations and "[#" not in answer_text:
-            refs = " ".join(f"[#{i}]" for i in range(1, len(citations) + 1))
-            answer_text = f"{answer_text} 参考引用：{refs}"
-
         useful_by_video: dict[str, list[Segment]] = {}
         for seg in useful_segments:
             useful_by_video.setdefault(seg.live_id, []).append(seg)
@@ -1376,9 +1348,6 @@ class VideoKnowledgeQA:
                 video_evidence,
                 video_useful,
             )
-            if video_citations and "[#" not in video_answer:
-                refs = " ".join(f"[#{i}]" for i in range(1, len(video_citations) + 1))
-                video_answer = f"{video_answer} 参考引用：{refs}".strip()
             video_results.append(
                 {
                     **meta,
