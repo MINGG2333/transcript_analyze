@@ -11,7 +11,7 @@ import uuid
 
 from .indexer import BM25Index, SegmentStore, VectorIndex
 from .models import Segment
-from .name_normalizer import normalize_text
+from .name_normalizer import normalize_text, normalize_segments_text
 from .parsers import collect_segments
 
 
@@ -157,6 +157,13 @@ class VideoKnowledgeQA:
         parsed_count = len(all_segments)
         if self.logger:
             self.logger.info(f"解析得到 {parsed_count} 个片段")
+
+        # ── 数据层归一化：入库前对片段文本做同音异形词替换 ──
+        # 确保向量索引和 BM25 索引基于规范名称，避免「陈佳怡」和「陈嘉仪」
+        # 被当作不同实体处理。
+        normalize_segments_text(all_segments)
+        if self.logger:
+            self.logger.info("已完成片段文本的同音异形词归一化")
 
             # 动态统计不同类型的片段
             participant_types = {}
