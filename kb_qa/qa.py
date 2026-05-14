@@ -251,15 +251,23 @@ class VideoKnowledgeQA:
         vector_ids, vector_scores = self.vector.retrieve(vector_query, top_k=vector_top_k)
         # Filter by score threshold
         vector_filtered = [(sid, score) for sid, score in zip(vector_ids, vector_scores) if score >= vector_score_threshold]
-        if self.logger:
-            self.logger.info(f"[2/6] 向量检索完成，得到 {len(vector_ids)} 个候选段，过滤后 {len(vector_filtered)} 个")
-            self.logger.debug("[2/6] 向量检索按相似度排序的前200条结果：")
-            for rank, (sid, score) in enumerate(sorted(vector_filtered, key=lambda x: x[1], reverse=True)[:200], start=1):
-                seg = self.store.segments.get(sid)
-                text_snippet = seg.text.replace("\n", " ").strip() if seg else "<missing segment>"
+        # 构建向量检索超清单（所有过滤后的命中，用于存档 Debug）
+        vector_hits_all = []
+        for rank, (sid, score) in enumerate(sorted(vector_filtered, key=lambda x: x[1], reverse=True), start=1):
+            seg = self.store.segments.get(sid)
+            text_snippet = seg.text.replace("\n", " ").strip() if seg else "<missing segment>"
+            vector_hits_all.append({
+                "rank": rank,
+                "segment_id": sid,
+                "score": round(score, 6),
+                "text_snippet": text_snippet[:120],
+            })
+            if rank <= 200 and self.logger:
                 self.logger.debug(
                     f"  {rank:03d}. {sid} score={score:.6f} text={text_snippet}"
                 )
+        if self.logger:
+            self.logger.info(f"[2/6] 向量检索完成，得到 {len(vector_ids)} 个候选段，过滤后 {len(vector_filtered)} 个")
 
         if self.logger:
             self.logger.info("[3/6] 开始BM25查询改写，辅助检索语句更聚焦")
@@ -272,15 +280,23 @@ class VideoKnowledgeQA:
         bm25_ids, bm25_scores = self.get_bm25().retrieve(bm25_query, top_k=bm25_top_k)
         # Filter by score threshold
         bm25_filtered = [(sid, score) for sid, score in zip(bm25_ids, bm25_scores) if score >= bm25_score_threshold]
-        if self.logger:
-            self.logger.info(f"[4/6] BM25检索完成，得到 {len(bm25_ids)} 个候选段，过滤后 {len(bm25_filtered)} 个")
-            self.logger.debug("[4/6] BM25检索按分数排序的前200条结果：")
-            for rank, (sid, score) in enumerate(sorted(bm25_filtered, key=lambda x: x[1], reverse=True)[:200], start=1):
-                seg = self.store.segments.get(sid)
-                text_snippet = seg.text.replace("\n", " ").strip() if seg else "<missing segment>"
+        # 构建 BM25 检索超清单（所有过滤后的命中，用于存档 Debug）
+        bm25_hits_all = []
+        for rank, (sid, score) in enumerate(sorted(bm25_filtered, key=lambda x: x[1], reverse=True), start=1):
+            seg = self.store.segments.get(sid)
+            text_snippet = seg.text.replace("\n", " ").strip() if seg else "<missing segment>"
+            bm25_hits_all.append({
+                "rank": rank,
+                "segment_id": sid,
+                "score": round(score, 6),
+                "text_snippet": text_snippet[:120],
+            })
+            if rank <= 200 and self.logger:
                 self.logger.debug(
                     f"  {rank:03d}. {sid} score={score:.6f} text={text_snippet[:120]}"
                 )
+        if self.logger:
+            self.logger.info(f"[4/6] BM25检索完成，得到 {len(bm25_ids)} 个候选段，过滤后 {len(bm25_filtered)} 个")
 
         if self.logger:
             self.logger.info(f"[5/6] 合并向量和BM25结果")
@@ -358,50 +374,34 @@ class VideoKnowledgeQA:
         if self.logger:
             self.logger.info(f"[6/6] 上下文扩展完成，得到 {len(candidates)} 个扩展后的片段")
 
-        truncated = False
-        if max_expanded_segments is not None and len(candidates) > max_expanded_segments:
-            # 截断前记录前30个候选片段的详细信息（含分数明细）
-            if self.logger:
-                merged_ids_set = set(merged_ids)
-                self.logger.debug("=== 截断前候选片段详情（前30个）===")
-                for idx, seg in enumerate(candidates[:30], start=1):
-                    base_info = merged_dict.get(seg.segment_id, {})
-                    text_snippet = seg.text.replace("\n", " ").strip()[:80]
-                    is_base = "基段" if seg.segment_id in merged_ids_set else "上下文扩展"
-                    self.logger.debug(
-                        f"  {idx:02d}. id={seg.segment_id} | "
-                        f"来源={is_base} | "
-                        f"类型={seg.source_label} | "
-                        f"视频={seg.video_title} | "
-                        f"偏移={seg.hhmmss} | "
-                        f"vector={base_info.get('vector_score', 'N/A')} | "
-                        f"bm25={base_info.get('bm25_score', 'N/A')} | "
-                        f"combined={base_info.get('combined_score', 'N/A')} | "
-                        f"内容={text_snippet!r}"
-                    )
-                self.logger.debug("=== 截断前候选片段详情结束 ===")
-
-            candidates = candidates[:max_expanded_segments]
-            truncated = True
-            if self.logger:
-                self.logger.info(f"[6/6] 扩展段数超出限制，截断至 {max_expanded_segments}")
+        # max_expanded_segments 已弃用（不再截断），所有扩展片段全部保留
+        merged_ids_set = set(merged_ids)
 
         stats = {
             "vector_hits_raw": len(vector_ids),
             "vector_hits_filtered": len(vector_filtered),
             "vector_score_threshold": vector_score_threshold,
+            "vector_query": vector_query,
+            "vector_refinement": vector_refinement,
+            "vector_hits_all": vector_hits_all,
             "bm25_query": bm25_query,
             "bm25_refinement": bm25_refinement,
+            "bm25_hits_all": bm25_hits_all,
             "bm25_hits_raw": len(bm25_ids),
             "bm25_hits_filtered": len(bm25_filtered),
             "bm25_score_threshold": bm25_score_threshold,
             "raw_merged_ids": raw_merged_count,
             "used_base_ids": len(merged_ids),
+            "merged_ids_set": list(merged_ids_set),
+            "merged_dict_scores": {
+                sid: {"vector_score": v["vector_score"], "bm25_score": v["bm25_score"], "source": v["source"]}
+                for sid, v in merged_dict.items()
+            },
             "candidate_count": len(candidates),
             "context_window": context_window,
             "max_base_segments": max_base_segments,
             "max_expanded_segments": max_expanded_segments,
-            "truncated": truncated,
+            "truncated": False,
         }
         return candidates, stats
 
@@ -853,41 +853,53 @@ class VideoKnowledgeQA:
         }
         return analysis, useful_segments, summary, llm_calls
 
-    def _build_synthesis_prompt(
+    def _build_group_synthesis_prompt(
         self,
         question: str,
-        useful_segments: list[Segment],
-        synthesis_context_window: int,
+        segments: list[Segment],
+        group_info: str = "",
+        batch_label: str = "",
     ) -> list[dict[str, str]]:
+        """构建分组合成的prompt。
+
+        与旧的 `_build_synthesis_prompt` 不同：
+        - 不添加每条片段的局部上下文（因为候选片段已经是上下文扩展后的完整序列）
+        - 片段按时间顺序简单列出即可
+        """
         lines: list[str] = []
-        for s in useful_segments:
+        for s in segments:
             lines.append(
-                self._format_segment_with_local_context(
-                    s,
-                    context_window=synthesis_context_window,
-                )
+                f"[{s.segment_id}] 类型={s.source_label}; "
+                f"视频内时间={s.hhmmss}; "
+                f"内容={s.text}"
             )
         context = "\n".join(lines)
         bg_text = self._build_kb_background_text()
+
+        header_parts = []
+        if group_info:
+            header_parts.append(f"直播视频信息：{group_info}")
+        if batch_label:
+            header_parts.append(f"批次：{batch_label}")
+        header = "\n".join(header_parts) + "\n\n" if header_parts else ""
+
         return [
             {
                 "role": "user",
                 "content": (
-                    "你是一名熟知这名主播的粉丝，现在请根据下面提供的直播片段及其局部上下文来回答问题。\n\n"
+                    "你是一名熟知这名主播的粉丝，现在请根据下面提供的直播片段来回答问题。\n\n"
                     "注意区分不同来源的角色：\n"
                     "- 「主播讲话」类型：内容是主播本人说的，但主播可能在说话中**引用/转述他人话语**，需要结合上下文分辨。\n"
                     "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n\n"
                     "⚠️ 重要提示——如何区分主播「自述」与「转述/引用」：\n"
-                    "由于转录文本没有标点符号，请结合**同一直播相邻片段的上下文**判断：\n"
+                    "由于转录文本没有标点符号，请结合同一视频内相邻片段的上下文判断：\n"
                     "  • 如果主播讲话中带有\"有人说\"\"有弹幕说\"\"刚才有人说\"\"xx说\"\"我念一下\"等标志词，后面内容可能是**转述**。\n"
                     "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
                     "  • 请在 evidence 的 reason 字段中注明每段内容是「主播自述」还是「主播转述」。\n\n"
                     f"{bg_text}\n\n"
                     "🧠 通用推理原则：\n"
-                    "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），"
-                    "结合片段上下文来判断主播话语的真实含义。\n"
-                    "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），"
-                    "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
+                    "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），结合片段上下文来判断主播话语的真实含义。\n"
+                    "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
                     "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
                     "4) 请在 evidence 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
                     "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为证据。\n\n"
@@ -895,17 +907,20 @@ class VideoKnowledgeQA:
                     "请用自然、亲切的口吻回答，就像在跟朋友介绍一样。在提到片段的证据时，用 [#1]、[#2] 这样的标记引用对应的证据条目。\n"
                     "不需要在回答末尾列出所有引用的编号，只需要在回答中自然地插入引用标记即可。\n"
                     "例如：\"根据片段中的账号名 [#1]，陈嘉仪是SNH48的成员。\"\n\n"
+                    f"{header}"
                     f"用户问题：{question}\n\n"
-                    "片段列表（每条含核心片段和局部上下文）：\n"
+                    "片段列表（按视频内时间排序）：\n"
                     f"{context}\n\n"
                     "请输出JSON对象，格式为：\n"
                     '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
                     "要求：\n"
                     "1) answer用自然的语言回答，在引用证据时插入 [#N] 标记；\n"
-                    "2) evidence仅包含那些**确实为答案提供了独特信息**的片段，如果多个片段提供的是重复信息，只保留最具代表性的一个即可；\n"
+                    "2) evidence必须包含所有**为答案提供了独特信息**的片段，即使是**间接的、部分的线索**也要收录；\n"
                     "3) 每个evidence条目说明该片段如何支持答案，并注明是「主播自述」还是「主播转述」；\n"
                     "4) evidence列表按时间顺序排列；\n"
-                    "5) 仅输出JSON，不要额外文本。"
+                    "5) **即使无法给出确定答案**：如果在片段中找到了**任何相关的间接线索**，也必须将这些片段放入evidence[]并说明其相关性；"
+                    "只有真正**毫无关联**的片段集合才返回空的 evidence[]。\n"
+                    "6) **仅输出JSON，不要额外文本**。"
                 ),
             }
         ]
@@ -1186,16 +1201,17 @@ class VideoKnowledgeQA:
             self.logger.info(
                 f"开始检索: vector_top_k={vector_top_k}, bm25_top_k={bm25_top_k}, context_window={context_window}"
             )
-        candidates, stats = self.retrieve(
-            question,
-            vector_top_k,
-            bm25_top_k,
-            context_window,
-            vector_score_threshold=vector_score_threshold,
-            bm25_score_threshold=bm25_score_threshold,
-            max_base_segments=200,
-            max_expanded_segments=300,
-        )
+            candidates, stats = self.retrieve(
+                question,
+                vector_top_k,
+                bm25_top_k,
+                context_window,
+                vector_score_threshold=vector_score_threshold,
+                bm25_score_threshold=bm25_score_threshold,
+                max_base_segments=200,
+                # max_expanded_segments 不设置（None），不截断，所有扩展片段全部保留
+                max_expanded_segments=None,
+            )
         if self.logger:
             self.logger.info(
                 f"检索结果: vector_hits_raw={stats['vector_hits_raw']}, vector_hits_filtered={stats['vector_hits_filtered']}, "
@@ -1204,6 +1220,7 @@ class VideoKnowledgeQA:
                 f"candidate_count={stats['candidate_count']}, truncated={stats['truncated']}"
             )
 
+        merged_ids_set = set(stats.get("merged_ids_set", []))
         retrieval_segments = [
             {
                 "segment_id": seg.segment_id,
@@ -1213,6 +1230,9 @@ class VideoKnowledgeQA:
                 "video_offset": seg.hhmmss,
                 "absolute_time": seg.absolute_time,
                 "text": seg.text,
+                "source_type": "基段" if seg.segment_id in merged_ids_set else "上下文扩展",
+                "vector_score": stats.get("merged_dict_scores", {}).get(seg.segment_id, {}).get("vector_score", None),
+                "bm25_score": stats.get("merged_dict_scores", {}).get(seg.segment_id, {}).get("bm25_score", None),
             }
             for seg in candidates
         ]
@@ -1238,14 +1258,35 @@ class VideoKnowledgeQA:
             return result
 
         if self.logger:
-            self.logger.info(f"候选片段数: {len(candidates)}，开始逐批分析有用性。")
-        analysis, useful_segments, analysis_summary, analysis_llm_calls = self._analyze_candidates(
-            question, candidates, analysis_batch_size, kb_description=self.kb_description or ""
-        )
+            self.logger.info(f"候选片段数: {len(candidates)}，跳过有用性分析，全部视为有用。")
+        # [方案C] 跳过LLM分析有用性阶段，全部候选片段保留供合成阶段自行判断。
+        # 这样避免了LLM分析的不稳定性（同样片段每次判断可能不同），
+        # 让最终合成LLM自己决定哪些片段有价值。
+        analysis = [
+            {
+                "segment_id": seg.segment_id,
+                "source_label": seg.source_label,
+                "video_title": seg.video_title,
+                "anchor_name": seg.anchor_name,
+                "video_offset": seg.hhmmss,
+                "absolute_time": seg.absolute_time,
+                "text": seg.text,
+                "useful": True,
+                "reason": "跳过分析阶段，全部保留",
+            }
+            for seg in candidates
+        ]
+        useful_segments = candidates  # 全部保留
+        analysis_summary = {
+            "total_candidates": len(candidates),
+            "useful_segment_count": len(candidates),
+            "analysis_batches": [],
+            "analysis_batch_size": analysis_batch_size,
+            "skipped": True,
+        }
+        analysis_llm_calls = []
         if self.logger:
-            self.logger.info(
-                f"分析完成: useful_segments={analysis_summary['useful_segment_count']} / {analysis_summary['total_candidates']}"
-            )
+            self.logger.info(f"跳过分析，全部 {len(candidates)} 个候选片段均进入合成阶段。")
 
         if not useful_segments:
             if self.logger:
@@ -1275,49 +1316,15 @@ class VideoKnowledgeQA:
             result["archive_path"] = str(archive_path)
             return result
 
-        final_evidence: list[dict[str, Any]] = []
-        answer_text = ""
-        synthesis_llm_metadata: dict[str, Any] = {}
-        if self.logger:
-            self.logger.info(
-                f"准备合成最终回答，使用 {len(useful_segments)} 个有用片段。"
-            )
-
-        if len(useful_segments) > synthesis_batch_trigger_count:
-            if self.logger:
-                self.logger.info(
-                    f"有用段数较多（>{synthesis_batch_trigger_count}），使用分批合成策略，batch_size={synthesis_batch_size}"
-                )
-            answer_text, final_evidence, synthesis_llm_metadata = self._synthesize_with_batches(
-                question,
-                useful_segments,
-                batch_size=synthesis_batch_size,
-                synthesis_context_window=synthesis_context_window,
-            )
-        else:
-            try:
-                parsed, synthesis_llm_metadata = self._call_llm_json(
-                    self._build_synthesis_prompt(
-                        question,
-                        useful_segments,
-                        synthesis_context_window=synthesis_context_window,
-                    ),
-                    "最终答案合成",
-                )
-                final_evidence = parsed.get("evidence", []) or []
-                answer_text = parsed.get("answer", "").strip() or "模型未返回有效答案。"
-            except Exception as exc:
-                if self.logger:
-                    self.logger.error(f"最终答案合成失败: {exc}")
-                answer_text = "模型在生成最终答案时发生错误。"
-                synthesis_llm_metadata = {"success": False, "error": str(exc)}
-
-        citations, final_evidence = self._build_citations_from_evidence(final_evidence, useful_segments)
-
-        useful_by_video: dict[str, list[Segment]] = {}
+        # ---- 按直播视频分组合成 ----
+        # 将候选片段按 live_id 分组，每组内按 start_time 排序
+        video_groups: dict[str, list[Segment]] = {}
         for seg in useful_segments:
-            useful_by_video.setdefault(seg.live_id, []).append(seg)
+            video_groups.setdefault(seg.live_id, []).append(seg)
+        for live_id in video_groups:
+            video_groups[live_id].sort(key=lambda s: s.start_time)
 
+        # 获取视频元信息
         video_meta: dict[str, dict[str, str]] = {}
         for seg in self.store.segments.values():
             if seg.live_id not in video_meta:
@@ -1328,56 +1335,203 @@ class VideoKnowledgeQA:
                     "video_datetime": seg.video_datetime,
                 }
 
+        # 每个视频分批处理（每批最多500条），不使用局部上下文（候选片段已是完整序列）
+        per_video_batch_size = 500
+        total_videos = len(video_groups)
+        if self.logger:
+            self.logger.info(f"开始合成：共 {total_videos} 个视频，{len(useful_segments)} 个片段")
+        all_evidence: list[dict[str, Any]] = []
         video_results: list[dict[str, Any]] = []
-        for live_id, meta in sorted(video_meta.items(), key=lambda x: (x[1]["video_datetime"], x[0])):
-            video_useful = useful_by_video.get(live_id, [])
-            if not video_useful:
-                video_results.append(
-                    {
-                        **meta,
-                        "answer": "",
-                        "citations": [],
-                        "useful_segment_count": 0,
-                    }
-                )
-                continue
-            video_answer = ""
-            video_evidence: list[dict[str, Any]] = []
-            if len(video_useful) > synthesis_batch_trigger_count:
-                video_answer, video_evidence, _ = self._synthesize_with_batches(
-                    question,
-                    video_useful,
-                    batch_size=synthesis_batch_size,
-                    synthesis_context_window=synthesis_context_window,
-                )
-            else:
-                try:
-                    parsed, _ = self._call_llm_json(
-                        self._build_synthesis_prompt(
-                            question,
-                            video_useful,
-                            synthesis_context_window=synthesis_context_window,
-                        ),
-                        f"直播 {live_id} 答案合成",
-                    )
-                    video_evidence = parsed.get("evidence", []) or []
-                    video_answer = parsed.get("answer", "").strip() or ""
-                except Exception:
-                    video_answer = ""
-                    video_evidence = []
-            video_citations, video_evidence = self._build_citations_from_evidence(
-                video_evidence,
-                video_useful,
-            )
-            video_results.append(
-                {
-                    **meta,
-                    "answer": video_answer,
-                    "citations": video_citations,
-                    "useful_segment_count": len(video_useful),
-                }
-            )
+        synthesis_llm_calls: list[dict[str, Any]] = []
 
+        for video_idx, (live_id, segs) in enumerate(sorted(video_groups.items(), key=lambda x: x[1][0].start_time if x[1] else 0), start=1):
+            meta = video_meta.get(live_id, {})
+            group_info = (
+                f"标题={meta.get('video_title', '')}, "
+                f"直播时间={meta.get('video_datetime', '')}, "
+                f"主播={meta.get('anchor_name', '')}"
+            )
+            total = len(segs)
+            n_batches = max(1, (total + per_video_batch_size - 1) // per_video_batch_size)
+
+            if self.logger:
+                self.logger.info(
+                    f"[{video_idx}/{total_videos}] 处理直播 {live_id}（{meta.get('video_title', '')}），"
+                    f"共 {total} 个片段，分 {n_batches} 批（每批最多 {per_video_batch_size} 条）"
+                )
+
+            video_evidence: list[dict[str, Any]] = []
+            video_answer_parts: list[str] = []
+
+            for batch_idx in range(n_batches):
+                start = batch_idx * per_video_batch_size
+                batch = segs[start:start + per_video_batch_size]
+                batch_label = f"{batch_idx + 1}/{n_batches}" if n_batches > 1 else ""
+
+                try:
+                    parsed, llm_meta = self._call_llm_json(
+                        self._build_group_synthesis_prompt(
+                            question,
+                            batch,
+                            group_info=group_info,
+                            batch_label=batch_label,
+                        ),
+                        f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}" if n_batches > 1 else f"直播 {live_id} 合成",
+                    )
+                    batch_evidence = parsed.get("evidence", []) or []
+                    batch_answer = parsed.get("answer", "").strip()
+                    synthesis_llm_calls.append(llm_meta)
+
+                    video_evidence.extend(batch_evidence)
+                    if batch_answer:
+                        video_answer_parts.append(batch_answer)
+
+                    if self.logger:
+                        self.logger.info(
+                            f"  批次 {batch_idx + 1}/{n_batches} 完成，"
+                            f"evidence={len(batch_evidence)} 条"
+                        )
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 合成失败: {exc}")
+
+            # 合并同一视频的多个批次的答案
+            if len(video_answer_parts) == 1:
+                video_answer = video_answer_parts[0]
+            elif len(video_answer_parts) > 1:
+                video_answer = "\n---\n".join(video_answer_parts)
+            else:
+                video_answer = ""
+
+            video_citations, _ = self._build_citations_from_evidence(video_evidence, segs)
+            video_results.append({
+                **meta,
+                "answer": video_answer,
+                "citations": video_citations,
+                "useful_segment_count": len(segs),
+                "batch_count": n_batches,
+            })
+            all_evidence.extend(video_evidence)
+
+            if self.logger:
+                self.logger.info(
+                    f"直播 {live_id} 合成完成: 共 {len(video_evidence)} 条 evidence"
+                )
+
+        # ---- 最终答案生成 ----
+        # 方案：
+        #   1. 无答案 → 提示未找到
+        #   2. 一个分组有答案 → 直接用（citations 随之生成）
+        #   3. 多个分组有答案 →
+        #      a. 先算出全局最终 citations 表（按 segment_id 全局编号）
+        #      b. 将每个分组答案中的旧 [#N] 映射为最终 [#N]
+        #      c. 将完整答案（不截断）喂给 LLM 合并
+        #      d. LLM只负责合并文本，引用序号已在输入层保证正确
+        answer_videos = [vr for vr in video_results if vr["answer"]]
+        if len(answer_videos) == 0:
+            answer_text = "未找到与问题直接相关的片段，无法给出确定答案。"
+            citations, final_evidence = [], []
+        elif len(answer_videos) == 1:
+            answer_text = answer_videos[0]["answer"]
+            # 只用这个分组的 evidence 生成 citations
+            video_evidence = all_evidence  # 只有一个分组会写入 all_evidence
+            citations, final_evidence = self._build_citations_from_evidence(
+                [ev for vr in answer_videos for ev in (vr.get("citations", []) or [])],
+                useful_segments,
+            )
+        else:
+            # 多个分组有答案 → 先计算出全局最终 citations
+            if self.logger:
+                self.logger.info(f"开始最终汇总合并，共 {len(answer_videos)} 个视频分组有答案")
+
+            # Step 1: 从所有分组的 evidence 生成最终 citation 表，建立映射
+            citations, final_evidence = self._build_citations_from_evidence(
+                all_evidence, useful_segments
+            )
+            # segment_id → 最终 citation_id (e.g. "#3")
+            seg_to_final_citation: dict[str, str] = {}
+            for c in citations:
+                seg_to_final_citation[c["segment_id"]] = c["citation_id"]
+
+            # Step 2: 为每个分组重写其答案中的引用编号
+            video_summaries = []
+            for idx, vr in enumerate(answer_videos, start=1):
+                # 替换答案中的旧 citation_id 为最终编号
+                raw_answer = vr["answer"]
+                remapped_answer = raw_answer
+                for old_c in vr.get("citations", []):
+                    old_id = old_c["citation_id"]
+                    new_id = seg_to_final_citation.get(old_c["segment_id"])
+                    if new_id and new_id != old_id:
+                        remapped_answer = remapped_answer.replace(old_id, new_id)
+
+                # 列出该分组实际引用的片段及其最终编号
+                evidence_lines = []
+                for c in vr.get("citations", []):
+                    final_id = seg_to_final_citation.get(c["segment_id"], c["citation_id"])
+                    text_snippet = c.get("quoted_text", "")
+                    evidence_lines.append(f"  [{final_id}] (类型={c['source_type']}, 视频={c['video_title']}) {text_snippet}")
+                evidence_text = "\n".join(evidence_lines) if evidence_lines else "  无直接引用片段"
+
+                video_summaries.append(
+                    f"[视频 {idx}] 标题={vr.get('video_title', '')}, "
+                    f"直播时间={vr.get('video_datetime', '')}\n"
+                    f"  答案：\n{remapped_answer}\n"
+                    f"  引用片段：\n{evidence_text}"
+                )
+            summaries_text = "\n\n".join(video_summaries)
+
+            # Step 3: 调用 LLM 合并（引用序号已在输入中正确）
+            merge_prompt = [
+                {
+                    "role": "user",
+                    "content": (
+                        "你是一名熟知这名主播的粉丝，现在需要将多个视频分组对同一个问题的分析结果"
+                        "合并成一个连贯、完整的答案。\n\n"
+                        "每个视频分组的分析结果包含该组的初步答案和引用的片段（引用编号已经是全局统一的最终编号）。\n"
+                        "你需要在保持信息完整性的前提下，去除重复内容，组织成一个结构清晰的统一答案。\n"
+                        "不要在答案中包含组号和分组的标记，而是自然地整合信息。\n"
+                        "引用编号 [#N] 已在输入中使用最终编号，输出时继续使用这些编号即可。\n\n"
+                        f"问题：{question}\n\n"
+                        "各视频分组分析结果：\n"
+                        f"{summaries_text}\n\n"
+                        "请输出JSON对象，格式为：\n"
+                        '{"answer":"..."}\n'
+                        "要求：\n"
+                        "1) answer 是一个连贯的、完整的最终答案，不要有分组标记；\n"
+                        "2) 引用编号已在输入中给出，直接沿用即可（无需创建新的引用）；\n"
+                        "3) 如果某些视频分组的答案只是重复背景常识（如\"SNH48是女子团体\"），"
+                        "可以合并成一句，不要每个分组都单独说一遍；\n"
+                        "4) 引用精简：仅当不同引用的论证角度高度相似时才去重保留最具代表性的几个即可；"
+                        "但如果某个引用提供了独特的信息角度或表达方式，即使都为同一结论服务，也应当保留——独特的表达本身就是亮点。\n"
+                        "5) 以自然、亲切的口吻回答，就像在跟朋友介绍一样。\n"
+                        "6) 回答应客观、负责任，避免对主播造成不当误导或负面形象。\n"
+                        "仅输出JSON，不要额外文本。"
+                    ),
+                }
+            ]
+            try:
+                parsed, merge_llm_meta = self._call_llm_json(merge_prompt, "最终答案合并")
+                answer_text = (parsed.get("answer") or "").strip()
+                if not answer_text:
+                    raise ValueError("LLM返回空答案")
+                synthesis_llm_calls.append(merge_llm_meta)
+                if self.logger:
+                    self.logger.info(f"最终答案合并完成，答案长度={len(answer_text)}")
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"最终答案合并失败，回退到简单拼接: {exc}")
+                answer_text = "\n\n---\n\n".join(vr["answer"] for vr in answer_videos)
+                # 此时 citations 已由 Step 1 算出
+        synthesis_llm_metadata = {
+            "description": "per_video_batch_synthesis",
+            "per_video_batch_size": per_video_batch_size,
+            "video_count": len(video_results),
+            "total_calls": len(synthesis_llm_calls),
+            "calls": synthesis_llm_calls,
+        }
+
+        created_at = datetime.now().isoformat(timespec="seconds")
         result = {
             "question": question,
             "answer": answer_text,
@@ -1387,12 +1541,22 @@ class VideoKnowledgeQA:
             "analysis_summary": analysis_summary,
             "useful_segment_count": len(useful_segments),
             "video_results": video_results,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at": created_at,
         }
+        # 按处理环节顺序构建存档数据
         archive_data = {
-            **result,
+            # 0. 元信息
+            "question": question,
+            "created_at": created_at,
+            # 1. 向量查询改写 → 向量检索 → BM25查询改写 → BM25检索 → 合并 → 上下文扩展
+            "retrieval": stats,
+            # 2. 扩展后的候选片段列表（每条标明了基段/扩展段以及检索分数）
             "retrieval_segments": retrieval_segments,
+            # 3. 分析摘要（跳过逻辑下的说明）
+            "analysis_summary": analysis_summary,
+            # 4. 分析结果（全部标记为有用）
             "analysis": analysis,
+            # 5. 有用片段列表
             "useful_segments": [
                 {
                     "segment_id": seg.segment_id,
@@ -1405,10 +1569,18 @@ class VideoKnowledgeQA:
                 }
                 for seg in useful_segments
             ],
+            # 6. 按直播分组合成结果
+            "video_results": video_results,
+            # 7. 所有LLM调用的元数据
             "llm_calls": {
                 "analysis_batches": analysis_llm_calls,
                 "synthesis": synthesis_llm_metadata,
             },
+            # 8. 最终答案
+            "answer": answer_text,
+            "citations": citations,
+            "retrieved_count": len(candidates),
+            "useful_segment_count": len(useful_segments),
         }
         archive_path = self._archive(archive_data)
         result["archive_path"] = str(archive_path)

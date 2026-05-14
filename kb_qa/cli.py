@@ -95,8 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     ask = sub.add_parser("ask", help="执行问答")
     ask.add_argument("--question", required=True, help="用户问题")
-    ask.add_argument("--vector-top-k", type=int, default=1000, help="向量检索的候选数（低内存服务器建议500-1000）")
-    ask.add_argument("--bm25-top-k", type=int, default=1000, help="BM25检索的候选数（低内存服务器建议500-1000）")
+    ask.add_argument("--vector-top-k", type=int, default=20, help="向量检索的候选数（低内存服务器建议<1000）")
+    ask.add_argument("--bm25-top-k", type=int, default=20, help="BM25检索的候选数（低内存服务器建议<1000）")
     ask.add_argument("--vector-score-threshold", type=float, default=0.31, help="向量检索相关性阈值 [0-1]")
     ask.add_argument("--bm25-score-threshold", type=float, default=11.0, help="BM25检索相关性阈值")
     ask.add_argument("--context-window", type=int, default=10, help="上下文扩展窗口大小")
