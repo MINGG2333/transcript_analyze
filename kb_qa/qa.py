@@ -478,6 +478,7 @@ class VideoKnowledgeQA:
                 "survey_total_relevant": survey_total_relevant,
                 "used_base_count": len(merged_ids),
                 "ratio": round(comprehensiveness_ratio, 4),
+                "bm25_query": bm25_query,
             },
         }
 
