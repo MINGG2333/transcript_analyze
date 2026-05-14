@@ -11,6 +11,7 @@ import uuid
 
 from .indexer import BM25Index, SegmentStore, VectorIndex
 from .models import Segment
+from .name_normalizer import normalize_text
 from .parsers import collect_segments
 
 
@@ -489,7 +490,7 @@ class VideoKnowledgeQA:
         for s in segments:
             lines.append(
                 f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
+                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={normalize_text(s.text)}"
             )
         context = "\n".join(lines)
         return (
@@ -503,7 +504,7 @@ class VideoKnowledgeQA:
             "  • 如果主播讲话中出现\"有人说\"\"有弹幕说\"\"刚才有人说\"\"这条弹幕说\"\"有个朋友说\"\"xx说\"（如\"佳佳说\"）等标志词，则后面的内容是**转述**。\n"
             "  • 如果主播讲话中出现\"我念一下\"\"我读一下\"\"他/她说\"\"粉丝说\"等口吻，其后内容多为转述。\n"
             "  • 如果主播连续说出一段完整的个人观点/叙述（无转述标志词），则为**主播自己的话**。\n\n"
-            f"用户问题：{question}\n\n"
+            f"用户问题：{normalize_text(question)}\n\n"
             "候选片段：\n"
             f"{context}\n\n"
             "请输出JSON对象，格式为：\n"
@@ -657,7 +658,7 @@ class VideoKnowledgeQA:
             return (
                 f"[{segment.segment_id}] 类型={segment.source_label}; 直播时间={segment.video_datetime}; "
                 f"视频内时间={segment.hhmmss}; 标题={segment.video_title}; 用户名={segment.anchor_name};\n"
-                f"核心片段内容：{segment.text}"
+                f"核心片段内容：{normalize_text(segment.text)}"
             )
 
         try:
@@ -666,7 +667,7 @@ class VideoKnowledgeQA:
             return (
                 f"[{segment.segment_id}] 类型={segment.source_label}; 直播时间={segment.video_datetime}; "
                 f"视频内时间={segment.hhmmss}; 标题={segment.video_title}; 用户名={segment.anchor_name};\n"
-                f"核心片段内容：{segment.text}"
+                f"核心片段内容：{normalize_text(segment.text)}"
             )
 
         start = max(0, pos - context_window)
@@ -679,7 +680,7 @@ class VideoKnowledgeQA:
                 continue
             marker = "核心片段" if sid == segment.segment_id else "上下文片段"
             local_lines.append(
-                f"  - [{marker}] ({local_seg.hhmmss}) [{local_seg.source_label}] 用户名={local_seg.anchor_name}; {local_seg.text}"
+                f"  - [{marker}] ({local_seg.hhmmss}) [{local_seg.source_label}] 用户名={local_seg.anchor_name}; {normalize_text(local_seg.text)}"
             )
 
 
@@ -783,7 +784,7 @@ class VideoKnowledgeQA:
         for s in segments:
             lines.append(
                 f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={s.text}"
+                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; 内容={normalize_text(s.text)}"
             )
         context = "\n".join(lines)
 
@@ -950,7 +951,7 @@ class VideoKnowledgeQA:
             lines.append(
                 f"[{s.segment_id}] 类型={s.source_label}; "
                 f"视频内时间={s.hhmmss}; "
-                f"内容={s.text}"
+                f"内容={normalize_text(s.text)}"
             )
         context = "\n".join(lines)
         bg_text = self._build_kb_background_text()
@@ -1072,7 +1073,7 @@ class VideoKnowledgeQA:
                     "citation_id": f"#{idx}",
                     "segment_id": sid,
                     "source_type": seg.source_label,
-                    "quoted_text": seg.text,
+                    "quoted_text": normalize_text(seg.text),
                     "video_offset": seg.hhmmss,
                     "absolute_time": seg.absolute_time,
                     "source_file": seg.file_path,
