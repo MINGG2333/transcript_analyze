@@ -8,6 +8,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .config import KB_QA_DEFAULTS
 from .qa import VideoKnowledgeQA
 
 # ── Script directory detection ──────────────────────────────────────────────
@@ -93,17 +94,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("build", help="构建或增量更新知识库")
 
+    d = KB_QA_DEFAULTS
     ask = sub.add_parser("ask", help="执行问答")
     ask.add_argument("--question", required=True, help="用户问题")
-    ask.add_argument("--vector-top-k", type=int, default=20, help="向量检索的候选数（低内存服务器建议<1000）")
-    ask.add_argument("--bm25-top-k", type=int, default=20, help="BM25检索的候选数（低内存服务器建议<1000）")
-    ask.add_argument("--vector-score-threshold", type=float, default=0.31, help="向量检索相关性阈值 [0-1]")
-    ask.add_argument("--bm25-score-threshold", type=float, default=11.0, help="BM25检索相关性阈值")
-    ask.add_argument("--context-window", type=int, default=10, help="上下文扩展窗口大小")
-    ask.add_argument("--analysis-batch-size", type=int, default=100, help="逐批分析候选片段时每批的最大数量")
-    ask.add_argument("--synthesis-context-window", type=int, default=6, help="合成阶段局部上下文窗口大小")
-    ask.add_argument("--synthesis-batch-trigger-count", type=int, default=100, help="触发分批合成的有用段阈值")
-    ask.add_argument("--synthesis-batch-size", type=int, default=50, help="分批合成时每批大小")
+    ask.add_argument("--vector-top-k", type=int, default=d.vector_top_k, help="向量检索的候选数（低内存服务器建议<1000）")
+    ask.add_argument("--bm25-top-k", type=int, default=d.bm25_top_k, help="BM25检索的候选数（低内存服务器建议<1000）")
+    ask.add_argument("--vector-score-threshold", type=float, default=d.vector_score_threshold, help="向量检索相关性阈值 [0-1]")
+    ask.add_argument("--bm25-score-threshold", type=float, default=d.bm25_score_threshold, help="BM25检索相关性阈值")
+    ask.add_argument("--context-window", type=int, default=d.context_window, help="上下文扩展窗口大小")
+    ask.add_argument("--analysis-batch-size", type=int, default=d.analysis_batch_size, help="逐批分析候选片段时每批的最大数量")
+    ask.add_argument("--synthesis-context-window", type=int, default=d.synthesis_context_window, help="合成阶段局部上下文窗口大小")
+    ask.add_argument("--synthesis-batch-trigger-count", type=int, default=d.synthesis_batch_trigger_count, help="触发分批合成的有用段阈值")
+    ask.add_argument("--synthesis-batch-size", type=int, default=d.synthesis_batch_size, help="分批合成时每批大小")
     return p
 
 

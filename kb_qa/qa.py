@@ -238,6 +238,8 @@ class VideoKnowledgeQA:
         bm25_score_threshold: float = 15.0,
         max_base_segments: Optional[int] = None,
         max_expanded_segments: Optional[int] = None,
+        vector_survey_top_k: int = 1000,
+        bm25_survey_top_k: int = 1000,
     ) -> tuple[list[Segment], dict[str, Any]]:
         if self.logger:
             self.logger.info("[1/6] 开始向量查询改写，辅助检索语句更聚焦语义")
@@ -245,13 +247,32 @@ class VideoKnowledgeQA:
         if self.logger:
             self.logger.info(f"[1/6] 向量查询改写完成，使用查询：{vector_query}")
 
+        # ── 调查阶段：以较大 top_k 检索，评估相关性较高的段的总数 ──
         if self.logger:
-            self.logger.info(f"[2/6] 开始从向量索引检索，top_k={vector_top_k}, score_threshold={vector_score_threshold}")
-            self.logger.debug(f"向量索引检索input: {vector_query}")
-        vector_ids, vector_scores = self.vector.retrieve(vector_query, top_k=vector_top_k)
-        # Filter by score threshold
+            self.logger.info(
+                f"[2/6·调查] 从向量索引通过Survey检索评估相关片段总量，"
+                f"survey_top_k={vector_survey_top_k}, score_threshold={vector_score_threshold}"
+            )
+        survey_vector_ids, survey_vector_scores = self.vector.retrieve(vector_query, top_k=vector_survey_top_k)
+        survey_vector_filtered = [
+            (sid, score) for sid, score in zip(survey_vector_ids, survey_vector_scores)
+            if score >= vector_score_threshold
+        ]
+        survey_vector_total = len(survey_vector_filtered)
+        if self.logger:
+            self.logger.info(
+                f"[2/6·调查] 向量Survey完成：{len(survey_vector_ids)}个候选中 "
+                f"{survey_vector_total}个超过阈值，实际将使用前{vector_top_k}个"
+            )
+
+        # ── 实际使用阶段：只取前 vector_top_k 个用于后续处理 ──
+        if self.logger:
+            self.logger.info(f"[2/6·使用] 从Survey结果中取前{vector_top_k}个，score_threshold={vector_score_threshold}")
+        vector_ids = survey_vector_ids[:vector_top_k] if vector_top_k < len(survey_vector_ids) else survey_vector_ids
+        vector_scores = survey_vector_scores[:vector_top_k] if vector_top_k < len(survey_vector_scores) else survey_vector_scores
         vector_filtered = [(sid, score) for sid, score in zip(vector_ids, vector_scores) if score >= vector_score_threshold]
         # 构建向量检索超清单（所有过滤后的命中，用于存档 Debug）
+
         vector_hits_all = []
         for rank, (sid, score) in enumerate(sorted(vector_filtered, key=lambda x: x[1], reverse=True), start=1):
             seg = self.store.segments.get(sid)
@@ -275,11 +296,31 @@ class VideoKnowledgeQA:
         if self.logger:
             self.logger.info(f"[3/6] BM25查询改写完成，使用查询：{bm25_query}")
 
+        # ── 调查阶段：以较大 top_k 检索，评估相关性较高的段的总数 ──
         if self.logger:
-            self.logger.info(f"[4/6] 开始从BM25索引检索，top_k={bm25_top_k}, score_threshold={bm25_score_threshold}")
-        bm25_ids, bm25_scores = self.get_bm25().retrieve(bm25_query, top_k=bm25_top_k)
-        # Filter by score threshold
+            self.logger.info(
+                f"[4/6·调查] 从BM25索引通过Survey检索评估相关片段总量，"
+                f"survey_top_k={bm25_survey_top_k}, score_threshold={bm25_score_threshold}"
+            )
+        survey_bm25_ids, survey_bm25_scores = self.get_bm25().retrieve(bm25_query, top_k=bm25_survey_top_k)
+        survey_bm25_filtered = [
+            (sid, score) for sid, score in zip(survey_bm25_ids, survey_bm25_scores)
+            if score >= bm25_score_threshold
+        ]
+        survey_bm25_total = len(survey_bm25_filtered)
+        if self.logger:
+            self.logger.info(
+                f"[4/6·调查] BM25 Survey完成：{len(survey_bm25_ids)}个候选中 "
+                f"{survey_bm25_total}个超过阈值，实际将使用前{bm25_top_k}个"
+            )
+
+        # ── 实际使用阶段：只取前 bm25_top_k 个用于后续处理 ──
+        if self.logger:
+            self.logger.info(f"[4/6·使用] 从Survey结果中取前{bm25_top_k}个，score_threshold={bm25_score_threshold}")
+        bm25_ids = survey_bm25_ids[:bm25_top_k] if bm25_top_k < len(survey_bm25_ids) else survey_bm25_ids
+        bm25_scores = survey_bm25_scores[:bm25_top_k] if bm25_top_k < len(survey_bm25_scores) else survey_bm25_scores
         bm25_filtered = [(sid, score) for sid, score in zip(bm25_ids, bm25_scores) if score >= bm25_score_threshold]
+
         # 构建 BM25 检索超清单（所有过滤后的命中，用于存档 Debug）
         bm25_hits_all = []
         for rank, (sid, score) in enumerate(sorted(bm25_filtered, key=lambda x: x[1], reverse=True), start=1):
@@ -377,6 +418,34 @@ class VideoKnowledgeQA:
         # max_expanded_segments 已弃用（不再截断），所有扩展片段全部保留
         merged_ids_set = set(merged_ids)
 
+        # ── 计算回答全面性比率 ──
+        # 对两种Survey方式中超过阈值的片段取并集，得到「预估相关段总数」
+        # 注意：survey_vector_filtered / survey_bm25_filtered 的数据在后续合并中
+        # 使用的是截断后的（取前vector_top_k/bm25_top_k），但这里的并集用的是
+        # 完整的survey结果（各1000条），因此能更全面反映实际存在的相关片段总量
+        survey_all_relevant_ids: set[str] = set()
+        for sid, score in zip(survey_vector_ids, survey_vector_scores):
+            if score >= vector_score_threshold:
+                survey_all_relevant_ids.add(sid)
+        for sid, score in zip(survey_bm25_ids, survey_bm25_scores):
+            if score >= bm25_score_threshold:
+                survey_all_relevant_ids.add(sid)
+        survey_total_relevant = len(survey_all_relevant_ids)
+        # 实际使用的唯一基础段数（合并后、上下文扩展前）
+        if survey_total_relevant > 0:
+            comprehensiveness_ratio = len(merged_ids) / survey_total_relevant
+        else:
+            comprehensiveness_ratio = 1.0
+
+        if self.logger:
+            self.logger.info(
+                f"[全面性评估] 向量Survey相关={survey_vector_total}, "
+                f"BM25 Survey相关={survey_bm25_total}, "
+                f"预估相关段总数={survey_total_relevant}, "
+                f"实际使用基段数={len(merged_ids)}, "
+                f"全面性比率={comprehensiveness_ratio:.2%}"
+            )
+
         stats = {
             "vector_hits_raw": len(vector_ids),
             "vector_hits_filtered": len(vector_filtered),
@@ -402,7 +471,16 @@ class VideoKnowledgeQA:
             "max_base_segments": max_base_segments,
             "max_expanded_segments": max_expanded_segments,
             "truncated": False,
+            # 全面性评估相关字段
+            "comprehensiveness": {
+                "survey_vector_total": survey_vector_total,
+                "survey_bm25_total": survey_bm25_total,
+                "survey_total_relevant": survey_total_relevant,
+                "used_base_count": len(merged_ids),
+                "ratio": round(comprehensiveness_ratio, 4),
+            },
         }
+
         return candidates, stats
 
     def _build_judge_prompt(self, question: str, segments: list[Segment]) -> str:
