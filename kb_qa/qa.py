@@ -535,21 +535,26 @@ class VideoKnowledgeQA:
             {
                 "role": "user",
                 "content": (
-                    "你是一个专业的BM25检索关键词优化助手。请分析用户问题，"
-                    "提取能够**精准缩小搜索范围**的关键词用于 BM25 检索。\n\n"
+                    "你是一个专业的BM25检索关键词优化助手。你的任务是生成一组BM25查询关键词，"
+                    "使得检索结果**精准覆盖到可能包含答案的片段**。\n\n"
                     f"数据库描述：{kb_description}\n\n"
-                    "请根据上述数据库描述进行推理：如果某个关键词在整个数据库中大量出现（"
-                    "例如主播名/嘉宾名在这样的直播数据库中几乎每条片段都会提及），"
-                    "则它对缩小搜索范围几乎没有帮助，**不应该作为检索关键词**。\n\n"
-                    "规则：\n"
-                    "1) **优先选择低频率、高区分度的关键词**——即那些在数据库中不常出现、"
-                    "能有效窄化搜索范围的关键词（如特定地点、时间、事件、行为等）。\n"
-                    "2) **排除高频泛义词**——如果数据库描述表明某个词在数据库中是普遍存在的"
-                    "（如主播名），则它对缩小搜索范围几乎没有帮助，**不要将其放入关键词**。\n"
-                    "3) 聚焦问题的核心意图——提取最能代表问题核心信息的关键词，而非简单提取所有命名实体。\n"
-                    "4) 若名称由重复的单一汉字组成（如\"顺顺\"），则需同时输出该单字和完整名称。\n"
-                    "5) 最终输出的关键词组合，搜索到的结果范围应当恰好在包含答案的范围内，"
-                    "不包含大量无关内容。关键词越少越好。\n\n"
+                    "核心原则：\n"
+                    "1) **排除高频无区分力的词**——主播名/嘉宾名在数据库中几乎每条都会出现，"
+                    "对缩小搜索范围**毫无帮助**，不要放入关键词。\n"
+                    "2) **优先用名词/名物词**，尽量避免通用动词——只有动词在数据库中属于低频率、"
+                    "高区分度的专用场景时（如\"考研\"\"退团\"）才保留；"
+                    "通用动词（如\"是\"\"有\"\"做\"\"说\"\"去\"\"来\"等）不会缩小搜索范围，不要放入。\n"
+                    "3) **大胆联想，越多越好**——请沿着以下思路，充分发挥想象力：\n"
+                    "   ① 同边形扩展：问题核心概念的同义词、近义词、口语/方言说法有哪些？\n"
+                    "   ② 下位扩展：如果核心概念是一个抽象类别，它的具体实例/成员有哪些？（比如\"性别\"包含哪些具体值）\n"
+                    "   ③ 场景扩展：与核心概念经常一起出现的人、事、物、地点、场景有哪些？\n"
+                    "   ④ 取值扩展：如果问题是询问某个属性的值，把所有可能的取值都列出来。\n"
+                    "   ⑤ 如果问题是针对某个具体非知名对象（如宠物的名字），则仅用通用词，不要猜具体名字。\n"
+                    "   ⑥ 如果问题涉及具体地点，请联想可能的方言口音、特色食物、风俗文化等领域词。\n"
+                    "4) 基于你训练数据中的可靠常识进行联想（如\"男/女\"是性别取值、\"四川/重庆/上海/广东\"是常见地域），"
+                    "放心输出，不要自我审查。但不要编造你无法确认的**具体事实**（如特定宠物的具体名字）。\n"
+                    "5) 最终输出**多词组合的查询字符串**（词之间用空格分隔），"
+                    "词越多越好，覆盖越全面越好，不限制数量。\n\n"
                     f"用户问题：{question}\n"
                     "请输出JSON对象：{\"refined_query\":\"...\"}。\n"
                     "仅输出JSON，不要额外文本。"
@@ -569,19 +574,22 @@ class VideoKnowledgeQA:
                     "你是一个专业的向量检索查询优化助手。你的任务是将用户的自然语言问题改写为"
                     "更适合向量（语义）检索的查询文本。\n\n"
                     f"数据库描述：{kb_description}\n\n"
-                    "请根据上述数据库描述进行推理：如果某些词（如主播名）在数据库中大量出现，"
-                    "则它们在向量空间中的嵌入可能无法有效区分不同片段。\n\n"
-                    "规则：\n"
-                    "1) **在保留核心语义的前提下，适当弱化高频泛义词的影响**——"
-                    "如果某个词在数据库中几乎每个条目中都存在，可以适当调整其表述方式"
-                    "（如将\"陈嘉仪在北舞上大学吗\"改写为\"曾在北舞上大学\"），"
-                    "使向量搜索更关注区分度高的语义成分。\n"
-                    "2) **保留问题核心意图的所有语义要素**——不要丢弃问题中的关键信息，"
-                    "只是调整表述方式，让核心概念更突出。\n"
-                    "3) **输出完整的语义句子**——不要只输出关键词，而是输出一个完整的、"
-                    "语义清晰的查询句子。\n"
-                    "4) **使用更通用的表述**——如果问题涉及特定名称但在数据库中普遍存在，"
-                    "可以用\"某人\"\"某地\"等通用表述替代，或直接聚焦核心概念。\n\n"
+                    "核心原则：\n"
+                    "1) **排除高频无区分力的词**——主播名/嘉宾名在数据库中几乎每条都会出现，"
+                    "应弱化或移除，让向量搜索更关注区分度高的语义成分。\n"
+                    "2) **保留核心语义，并用常识进行语义扩展**——根据问题类型，凭你的知识联想出"
+                    "相关的概念/场景，融入改写后的句子中，让向量检索能匹配到更丰富的相关片段。\n"
+                    "   例如：\n"
+                    "   - 问\"性别\" → 改写成\"这个人的性别是什么，男的还是女的，是哥还是姐还是娘\"\n"
+                    "   - 问\"祖籍/老家\" → 改写成\"是哪里人，老家在何处，曾在或不是来自某地\"\n"
+                    "   - 问\"年龄\" → 改写成\"某人多大年纪，几岁，什么年龄\"\n"
+                    "   - 问\"感情状况\" → 改写成\"恋爱关系，有男朋友或女朋友，单身，结婚\"\n"
+                    "   - 问\"职业/学业\" → 改写成\"大学专业，工作公司，毕业什么学校，做什么的\"\n"
+                    "   - 问\"宠物名字\" → **不要乱猜具体名字**，仅写\"宠物狗猫叫什么名字\"\n"
+                    "3) **输出完整的语义句子**——不要只输出关键词，而是输出一个或多个完整的、"
+                    "语义清晰的查询句子（多个句子用分号连接）。\n"
+                    "4) **不要编造你无法确认的具体信息**——比如不确定宠物的名字、不确定去过什么城市，"
+                    "就不要写入。宁可泛化，不要错写。\n\n"
                     f"用户问题：{question}\n"
                     "请输出JSON对象：{\"refined_query\":\"...\"}。\n"
                     "仅输出JSON，不要额外文本。"
@@ -1618,6 +1626,15 @@ class VideoKnowledgeQA:
             "calls": synthesis_llm_calls,
         }
 
+        # ── 过滤 citations，只保留最终答案中通过 [#N] 实际引用的条目 ──
+        # 避免 LLM 在合并多个视频分组答案时未使用全部引用，导致列表额外显示
+        citations_before = len(citations)
+        citations = self._filter_citations_by_answer(answer_text, citations)
+        # 过滤后重新从 #1 编号，并同步更新答案中的引用标记
+        answer_text, citations = self._renumber_citations(answer_text, citations)
+        if self.logger:
+            self.logger.info(f"引用过滤: 保留 {len(citations)}/{citations_before} 个 citations，已重编号")
+
         created_at = datetime.now().isoformat(timespec="seconds")
         result = {
             "question": question,
@@ -1672,6 +1689,100 @@ class VideoKnowledgeQA:
         archive_path = self._archive(archive_data)
         result["archive_path"] = str(archive_path)
         return result
+
+    @staticmethod
+    def _filter_citations_by_answer(answer: str, citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """过滤 citations 列表，只保留答案中通过 [#N] 或 [#N-#M] 实际引用的条目。"""
+        if not answer or not citations:
+            return [] if answer else citations
+
+        import re
+        referenced: set[int] = set()
+        for m in re.finditer(r"\[#(\d+)(?:-#(\d+))?\]", answer):
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else start
+            referenced.update(range(start, end + 1))
+
+        if not referenced:
+            return citations  # 未检测到引用标记，全部保留（兜底）
+
+        def _parse_citation_id(cid: str) -> int:
+            try:
+                return int(cid.lstrip("#"))
+            except (ValueError, AttributeError):
+                return -1
+
+        return [c for c in citations if _parse_citation_id(c.get("citation_id", "")) in referenced]
+
+    @staticmethod
+    def _renumber_citations(
+        answer: str, citations: list[dict[str, Any]]
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """过滤后重新从 #1 编号 citations，并更新 answer 中的引用标记。"""
+        if not citations:
+            return answer, citations
+
+        import re
+
+        # 构建旧编号 → 新编号的映射
+        old_ids = []
+        for c in citations:
+            try:
+                old_ids.append(int(c.get("citation_id", "").lstrip("#")))
+            except (ValueError, AttributeError):
+                old_ids.append(-1)
+
+        sorted_old_ids = sorted(old_ids)
+        id_mapping: dict[int, int] = {}
+        for new_idx, old_id in enumerate(sorted_old_ids, start=1):
+            id_mapping[old_id] = new_idx
+
+        # 更新 answer 中的引用标记（从大到小替换以避免冲突）
+        def replace_ref(m: re.Match) -> str:
+            start = int(m.group(1))
+            end = int(m.group(2)) if m.group(2) else start
+            new_nums = sorted(id_mapping.get(n, n) for n in range(start, end + 1))
+            # 压缩连续区间
+            ranges = []
+            cur_start = cur_end = None
+            for n in new_nums:
+                if cur_start is None:
+                    cur_start = cur_end = n
+                elif n == cur_end + 1:
+                    cur_end = n
+                else:
+                    ranges.append((cur_start, cur_end))
+                    cur_start = cur_end = n
+            if cur_start is not None:
+                ranges.append((cur_start, cur_end))
+
+            parts = []
+            for rs, re_ in ranges:
+                if rs == re_:
+                    parts.append(f"[#{rs}]")
+                else:
+                    parts.append(f"[#{rs}-#{re_}]")
+            return "".join(parts)
+
+        answer = re.sub(r"\[#(\d+)(?:-#(\d+))?\]", replace_ref, answer)
+
+        # 更新每个 citation 的 citation_id
+        for c in citations:
+            try:
+                old_id = int(c.get("citation_id", "").lstrip("#"))
+                c["citation_id"] = f"#{id_mapping.get(old_id, old_id)}"
+            except (ValueError, AttributeError):
+                pass
+
+        # 按新编号排序
+        def sort_key(c):
+            try:
+                return int(c.get("citation_id", "").lstrip("#"), 10)
+            except (ValueError, AttributeError):
+                return 0
+        citations.sort(key=sort_key)
+
+        return answer, citations
 
     def _archive(self, result: dict[str, Any]) -> Path:
         archive_dir = self.kb_dir / "qa_archive"
