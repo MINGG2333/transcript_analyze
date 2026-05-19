@@ -1002,6 +1002,14 @@ class VideoKnowledgeQA:
                     "请用自然、亲切的口吻回答，就像在跟朋友介绍一样。在提到片段的证据时，用 [#1]、[#2] 这样的标记引用对应的证据条目。\n"
                     "不需要在回答末尾列出所有引用的编号，只需要在回答中自然地插入引用标记即可。\n"
                     "例如：\"根据片段中的账号名 [#1]，陈嘉仪是SNH48的成员。\"\n\n"
+                    "⚠️ 引用格式要求（重要）：\n"
+                    "一个中括号内**只能有一个引用编号**，格式如 [#1][#5] 等。\n"
+                    "禁止使用任何其他格式，包括但不限于：\n"
+                    "  - ❌ [#N-#M]（不允许区间写法，需要逐一列出 [#N]...[#M]）\n"
+                    "  - ❌ [#N, #M]（逗号分隔）\n"
+                    "  - ❌ [#N, #M, #K]（多个逗号分隔）\n"
+                    "  - ❌ [#N-M]（缺少#号）\n"
+                    "请严格遵守，否则系统无法正确识别引用标记。\n\n"
                     f"{header}"
                     f"用户问题：{question}\n\n"
                     "片段列表（按视频内时间排序）：\n"
@@ -1673,6 +1681,8 @@ class VideoKnowledgeQA:
                         "但如果某个引用提供了独特的信息角度或表达方式，即使都为同一结论服务，也应当保留——独特的表达本身就是亮点。\n"
                         "5) 以自然、亲切的口吻回答，就像在跟朋友介绍一样。\n"
                         "6) 回答应客观、负责任，避免对主播造成不当误导或负面形象。\n"
+                        "7) 引用格式必须严格遵守：一个中括号内只能有一个引用编号，格式如 [#1]、[#5]。"
+                        "禁止使用 [#N-#M]（区间）、[#N, #M]（逗号）、[#N-M]（缺少#号）等非标准格式。\n"
                         "仅输出JSON，不要额外文本。"
                     ),
                 }
@@ -1691,6 +1701,31 @@ class VideoKnowledgeQA:
                 synthesis_llm_calls.append(merge_llm_meta)
                 if self.logger:
                     self.logger.info(f"最终答案合并完成，答案长度={len(answer_text)}")
+
+                # 校验引用格式，不通过则让 LLM 修正
+                invalid_refs = self._validate_answer_citations(answer_text)
+                if invalid_refs:
+                    correction_msg = (
+                        "⚠️ 答案中的以下引用格式不符合要求，请修正：\n"
+                        + "\n".join(f"  ❌ {r}" for r in invalid_refs)
+                        + "\n\n引用格式必须为 [#N]（如 [#1]、[#5]），一个中括号内只能有一个引用编号。"
+                        "禁止使用 [#N-#M]（区间）、[#N, #M]（逗号）等非标准格式。"
+                    )
+                    if self.logger:
+                        self.logger.warning(f"最终答案合并引用格式不通过，重试: {invalid_refs}")
+                    retry_prompt = list(merge_prompt)
+                    retry_prompt.append({"role": "assistant", "content": json.dumps({"answer": answer_text})})
+                    retry_prompt.append({"role": "user", "content": correction_msg})
+                    parsed, merge_llm_meta = self._call_llm_json(retry_prompt, "最终答案合并（引用格式修正）")
+                    if self.logger:
+                        self.logger.debug("=== 最终答案合并 LLM 调用 - 修正后 Response ===")
+                        self.logger.debug(json.dumps(parsed, ensure_ascii=False))
+                    answer_text = (parsed.get("answer") or "").strip()
+                    if not answer_text:
+                        raise ValueError("LLM修正后返回空答案")
+                    synthesis_llm_calls.append(merge_llm_meta)
+                    if self.logger:
+                        self.logger.info(f"最终答案合并（修正后）完成，答案长度={len(answer_text)}")
             except Exception as exc:
                 if self.logger:
                     self.logger.warning(f"最终答案合并失败，回退到简单拼接: {exc}")
@@ -1769,6 +1804,27 @@ class VideoKnowledgeQA:
         return result
 
     @staticmethod
+    def _validate_answer_citations(answer: str) -> list[str]:
+        """校验答案中的引用标记格式是否符合严格格式。
+
+        只允许格式：[#N]（如 [#1]、[#5]），一个中括号内只能有一个引用编号。
+        不允许 [#N-#M]（区间写法）、[#N, #M]（逗号）等非标准格式。
+
+        返回：不符合格式的引用字符串列表，为空表示全部合法。
+        """
+        if not answer:
+            return []
+        import re
+        all_brackets = list(re.finditer(r"\[[^\]]*\]", answer))
+        allowed = re.compile(r"^\[\#\d+\]$")
+        invalid: list[str] = []
+        for m in all_brackets:
+            text = m.group()
+            if "#" in text and not allowed.match(text):
+                invalid.append(text)
+        return invalid
+
+    @staticmethod
     def _filter_citations_by_answer(answer: str, citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """过滤 citations 列表，只保留答案中通过 [#N] 或 [#N-#M] 实际引用的条目。"""
         if not answer or not citations:
@@ -1816,6 +1872,7 @@ class VideoKnowledgeQA:
             id_mapping[old_id] = new_idx
 
         # 更新 answer 中的引用标记（从大到小替换以避免冲突）
+        # 最终输出可以压缩连续区间，如 [#1][#2][#3] → [#1-#3]
         def replace_ref(m: re.Match) -> str:
             start = int(m.group(1))
             end = int(m.group(2)) if m.group(2) else start
@@ -1833,7 +1890,6 @@ class VideoKnowledgeQA:
                     cur_start = cur_end = n
             if cur_start is not None:
                 ranges.append((cur_start, cur_end))
-
             parts = []
             for rs, re_ in ranges:
                 if rs == re_:
