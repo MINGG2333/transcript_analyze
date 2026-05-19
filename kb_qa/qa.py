@@ -15,6 +15,56 @@ from .name_normalizer import normalize_text, normalize_segments_text
 from .parsers import collect_segments
 
 
+# ============================================================
+# 可复用的 Prompt 片段常量
+# ============================================================
+
+# 答风格 + 引用标记位置规则
+ANSWER_STYLE_RULES = (
+    "💬 回答风格要求：\n"
+    "请用自然、亲切的口吻回答，就像在跟朋友介绍一样。需要在回答中自然地插入引用标记。\n"
+    "引用标记 `[#N]` 要紧贴所支持的分句之后，不要集中放到句子或段落末尾，更不要统一放到回答最后。\n"
+    "每个 evidence 条目的 `citation_id` 字段标注编号（#1、#2...），你需在 answer 中使用对应编号的引用标记。\n"
+    '例如：根据片段中的账号名 [#1]，陈嘉仪是SNH48的成员。\n\n'
+)
+
+# 引用格式严格规则
+CITATION_FORMAT_RULES = (
+    "⚠️ 引用格式要求（重要）：\n"
+    "一个中括号内**只能有一个引用编号**，格式如 [#1][#5] 等。\n"
+    "禁止使用任何其他格式，包括但不限于：\n"
+    "  - ❌ [#N-#M]（不允许区间写法，需要逐一列出 [#N]...[#M]）\n"
+    "  - ❌ [#N, #M]（逗号分隔）\n"
+    "  - ❌ [#N, #M, #K]（多个逗号分隔）\n"
+    "  - ❌ [#N-M]（缺少#号）\n"
+    "请严格遵守，否则系统无法正确识别引用标记。\n\n"
+)
+
+# 来源角色区分
+SOURCE_DISTINCTION_RULES = (
+    "注意区分不同来源的角色：\n"
+    "- 「主播讲话」类型：内容是主播本人说的，但主播可能在说话中**引用/转述他人话语**，需要结合上下文分辨。\n"
+    "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n\n"
+    "⚠️ 重要提示——如何区分主播「自述」与「转述/引用」：\n"
+    "由于转录文本没有标点符号，请结合同一视频内相邻片段的上下文判断：\n"
+    "  • 如果主播讲话中带有\"有人说\"\"有弹幕说\"\"刚才有人说\"\"xx说\"\"我念一下\"等标志词，后面内容可能是**转述**。\n"
+    "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
+    "  • 请在 evidence 的 reason 字段中注明每段内容是「主播自述」还是「主播转述」。\n\n"
+)
+
+# 推理原则
+REASONING_RULES = (
+    "🧠 通用推理原则：\n"
+    "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），"
+    "结合片段上下文来判断主播话语的真实含义。\n"
+    "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），"
+    "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
+    "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
+    "4) 请在 evidence 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
+    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为证据。\n\n"
+)
+
+
 class VideoKnowledgeQA:
     def __init__(
         self,
@@ -515,7 +565,7 @@ class VideoKnowledgeQA:
             "候选片段：\n"
             f"{context}\n\n"
             "请输出JSON对象，格式为：\n"
-            '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
+            '{"answer":"...","evidence":[{"segment_ids":["..."],"citation_type":"...","reason":"..."}]}\n'
             "要求：\n"
             "1) answer字段中如果列出事实或时间，请尽量用 [#1]、[#2] 这样的引用标记对应 evidence 条目；\n"
             "2) 在evidence的reason字段中，请注明该段内容是「主播自述」还是「主播转述」；\n"
@@ -963,9 +1013,11 @@ class VideoKnowledgeQA:
         """
         lines: list[str] = []
         for s in segments:
+            user_info = f"用户名={s.anchor_name}; " if s.anchor_name else ""
             lines.append(
                 f"[{s.segment_id}] 类型={s.source_label}; "
                 f"视频内时间={s.hhmmss}; "
+                f"{user_info}"
                 f"内容={normalize_text(s.text)}"
             )
         context = "\n".join(lines)
@@ -983,49 +1035,29 @@ class VideoKnowledgeQA:
                 "role": "user",
                 "content": (
                     "你是一名熟知这名主播的粉丝，现在请根据下面提供的直播片段来回答问题。\n\n"
-                    "注意区分不同来源的角色：\n"
-                    "- 「主播讲话」类型：内容是主播本人说的，但主播可能在说话中**引用/转述他人话语**，需要结合上下文分辨。\n"
-                    "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n\n"
-                    "⚠️ 重要提示——如何区分主播「自述」与「转述/引用」：\n"
-                    "由于转录文本没有标点符号，请结合同一视频内相邻片段的上下文判断：\n"
-                    "  • 如果主播讲话中带有\"有人说\"\"有弹幕说\"\"刚才有人说\"\"xx说\"\"我念一下\"等标志词，后面内容可能是**转述**。\n"
-                    "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
-                    "  • 请在 evidence 的 reason 字段中注明每段内容是「主播自述」还是「主播转述」。\n\n"
+                    f"{SOURCE_DISTINCTION_RULES}"
                     f"{bg_text}\n\n"
-                    "🧠 通用推理原则：\n"
-                    "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），结合片段上下文来判断主播话语的真实含义。\n"
-                    "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
-                    "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
-                    "4) 请在 evidence 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
-                    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为证据。\n\n"
-                    "💬 回答风格要求：\n"
-                    "请用自然、亲切的口吻回答，就像在跟朋友介绍一样。在提到片段的证据时，用 [#1]、[#2] 这样的标记引用对应的证据条目。\n"
-                    "不需要在回答末尾列出所有引用的编号，只需要在回答中自然地插入引用标记即可。\n"
-                    "例如：\"根据片段中的账号名 [#1]，陈嘉仪是SNH48的成员。\"\n\n"
-                    "⚠️ 引用格式要求（重要）：\n"
-                    "一个中括号内**只能有一个引用编号**，格式如 [#1][#5] 等。\n"
-                    "禁止使用任何其他格式，包括但不限于：\n"
-                    "  - ❌ [#N-#M]（不允许区间写法，需要逐一列出 [#N]...[#M]）\n"
-                    "  - ❌ [#N, #M]（逗号分隔）\n"
-                    "  - ❌ [#N, #M, #K]（多个逗号分隔）\n"
-                    "  - ❌ [#N-M]（缺少#号）\n"
-                    "请严格遵守，否则系统无法正确识别引用标记。\n\n"
+                    f"{REASONING_RULES}"
+                    f"{ANSWER_STYLE_RULES}"
+                    f"{CITATION_FORMAT_RULES}"
                     f"{header}"
                     f"用户问题：{question}\n\n"
                     "片段列表（按视频内时间排序）：\n"
                     f"{context}\n\n"
                     "请输出JSON对象，格式为：\n"
-                    '{"answer":"...","evidence":[{"segment_ids":["...","..."],"citation_type":"...","reason":"..."}]}\n'
+                    '{"answer":"...","evidence":[{"citation_id":"#1","segment_ids":["...","..."],"citation_type":"...","reason":"..."}]}\n'
                     "要求：\n"
-                    "1) answer用自然的语言回答，在引用证据时插入 [#N] 标记；\n"
+                    "1) answer用自然的语言回答，在引用证据时插入 [#N] 标记，编号就是 evidence 条目中的 `citation_id` 值；\n"
                     "2) evidence必须包含所有**为答案提供了独特信息**的片段，即使是**间接的、部分的线索**也要收录；\n"
-                    "3) 每个evidence条目可以引用**一条或多条片段**（`segment_ids`数组），并给出该组作为一个整体的理由（`reason`）。"
+                    "3) 每个evidence条目必须包含 `citation_id`（如 #1、#2...）自标注编号，以及引用**一条或多条片段**的`segment_ids`数组，并给出该组作为一个整体的理由（`reason`）。"
                     "对于由多个片段的组合才完整表达的意思，请将它们归入同一条evidence。\n"
+                    "⚠️ `reason` 字段中**禁止使用 [#N] 引用标记**，reason 是文字说明，不需要引用编号。"
+                    "引用标记 `[#N]` 只允许出现在 `answer` 字段中。\n"
                     "4) `citation_type`字段填写该条evidence的类型，可选值：\n"
                     "   - 「主播讲话」：仅包含主播讲话片段\n"
                     "   - 「观众弹幕」：仅包含观众弹幕片段\n"
                     "   - 「互动对话」：同时包含主播讲话和观众弹幕（显示对话互动关系）\n"
-                    "5) evidence列表按时间顺序排列；\n"
+                    "5) evidence列表按时间顺序排列，`citation_id` 也应随之递增（#1、#2...）；\n"
                     "6) **即使无法给出确定答案**：如果在片段中找到了**任何相关的间接线索**，也必须将这些片段放入evidence[]并说明其相关性；"
                     "只有真正**毫无关联**的片段集合才返回空的 evidence[]。\n"
                     "7) **仅输出JSON，不要额外文本**。"
@@ -1092,12 +1124,7 @@ class VideoKnowledgeQA:
         citations: list[dict[str, Any]] = []
 
         for idx, item in enumerate(normalized_evidence, start=1):
-            # 支持新格式 segment_ids 数组，以及向后兼容旧格式 segment_id 字符串
             sids: list[str] = item.get("segment_ids", []) or []
-            if not sids:
-                sid = item.get("segment_id")
-                if sid:
-                    sids = [sid]
             if not sids:
                 continue
 
@@ -1112,20 +1139,6 @@ class VideoKnowledgeQA:
                 "citation_type": item.get("citation_type", ""),
                 "reason": item.get("reason", ""),
             }
-            # 向后兼容：保留旧的 segment_id / quoted_text 等顶层字段
-            first = segs[0]
-            citation["segment_id"] = first.segment_id
-            citation["source_type"] = first.source_label
-            citation["quoted_text"] = normalize_text(first.text)
-            citation["video_offset"] = first.hhmmss
-            citation["absolute_time"] = first.absolute_time
-            citation["source_file"] = first.file_path
-            citation["video_path"] = first.video_path
-            citation["video_title"] = first.video_title
-            citation["anchor_name"] = first.anchor_name
-            citation["live_id"] = first.live_id
-
-            # 完整的多段信息
             for s in segs:
                 citation["segments"].append(
                     {
@@ -1251,40 +1264,25 @@ class VideoKnowledgeQA:
                 {
                     "role": "user",
                     "content": (
-                        "你是一名熟知这名主播的粉丝，基于下面的批次摘要和关键片段，生成一个全面的最终答案。\n"
-                        "注意区分不同来源的角色：\n"
-                        "- 「主播讲话」类型：内容是主播本人说的，但主播可能在说话中**引用/转述他人话语**，需要结合上下文分辨。\n"
-                        "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n\n"
-                        "⚠️ 重要提示——如何区分主播「自述」与「转述/引用」：\n"
-                        "由于转录文本没有标点符号，请结合**同一直播相邻片段的上下文**判断：\n"
-                        "  • 如果主播讲话中带有\"有人说\"\"有弹幕说\"\"刚才有人说\"\"xx说\"\"我念一下\"等标志词，后面内容可能是**转述**。\n"
-                        "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
-                        "  • 请在 evidence 的 reason 字段中注明每段内容是「主播自述」还是「主播转述」。\n\n"
+                        "你是一名熟知这名主播的粉丝，基于下面的批次摘要和关键片段，生成一个全面的最终答案。\n\n"
+                        f"{SOURCE_DISTINCTION_RULES}"
                         f"{bg_text}\n\n"
-                        "🧠 通用推理原则：\n"
-                        "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），"
-                        "结合片段上下文来判断主播话语的真实含义。\n"
-                        "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），"
-                        "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
-                        "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
-                        "4) 请在 evidence 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n\n"
-                        " 回答风格要求：\n"
-                        "请用自然、亲切的口吻回答，就像在跟朋友介绍一样。在提到片段的证据时，用 [#1]、[#2] 这样的标记引用对应的证据条目。\n"
-                        "不需要在回答末尾列出所有引用的编号，只需要在回答中自然地插入引用标记即可。\n\n"
+                        f"{REASONING_RULES}"
+                        f"{ANSWER_STYLE_RULES}"
                         f"用户问题：{question}\n\n"
                         "批次摘要：\n"
                         f"{batch_summary_text}\n\n"
                         "关键片段列表（每条含核心片段和局部上下文）：\n"
                         f"{context}\n\n"
                         "请输出JSON对象，格式为：\n"
-                        '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
-                        "要求：\n"
-                        "1) answer必须是一个全面的、综合所有批次的答案，涵盖所有重要信息；\n"
-                        "2) evidence应包含所有关键segment_id，按时间顺序排列；\n"
-                        "3) 每个evidence条目说明该片段如何支持答案，并注明是「主播自述」还是「主播转述」；\n"
-                        "4) 力求完整性和全面性；\n"
-                        "5) 不遗漏任何关键片段。\n"
-                        "仅输出JSON，不要额外文本。"
+                    '{"answer":"...","evidence":[{"segment_ids":["..."],"citation_type":"...","reason":"..."}]}\n'
+                    "要求：\n"
+                    "1) answer必须是一个全面的、综合所有批次的答案，涵盖所有重要信息；\n"
+                    "2) evidence应包含所有关键segment_id，按时间顺序排列；\n"
+                    "3) 每个evidence条目说明该片段如何支持答案，并注明是「主播自述」还是「主播转述」；\n"
+                    "4) 力求完整性和全面性；\n"
+                    "5) 不遗漏任何关键片段。\n"
+                    "仅输出JSON，不要额外文本。"
                     ),
                 }
             ]
@@ -1499,9 +1497,6 @@ class VideoKnowledgeQA:
                     f"共 {total} 个片段，分 {n_batches} 批（每批最多 {per_video_batch_size} 条）"
                 )
 
-            video_evidence: list[dict[str, Any]] = []
-            video_answer_parts: list[str] = []
-
             for batch_idx in range(n_batches):
                 start = batch_idx * per_video_batch_size
                 batch = segs[start:start + per_video_batch_size]
@@ -1533,9 +1528,131 @@ class VideoKnowledgeQA:
                     batch_answer = parsed.get("answer", "").strip()
                     synthesis_llm_calls.append(llm_meta)
 
-                    video_evidence.extend(batch_evidence)
-                    if batch_answer:
-                        video_answer_parts.append(batch_answer)
+                    if not batch_answer:
+                        if self.logger:
+                            self.logger.info(f"  批次 {batch_idx + 1}/{n_batches} 无答案，跳过")
+                        continue
+
+                    # 每个批次独立作为一个"视频分组"结果
+                    batch_citations, _ = self._build_citations_from_evidence(batch_evidence, batch)
+
+                    # 先校验 local 层面的一致性（在计算全局编号之前）
+                    # 这样能尽早发现 LLM 返回的 batch_citations 和 batch_answer 不匹配的问题
+                    max_retries = 5
+                    for retry_attempt in range(max_retries + 1):
+                        # 如果 evidence 为空，清除 answer 中所有 [#N] 引用标记
+                        # 避免 LLM 写了不存在的引用编号混入全局编号空间
+                        import re
+                        if not batch_citations:
+                            global_answer = re.sub(r"\[\#\d+\]", "", batch_answer)
+                            global_citations = []
+                            if self.logger:
+                                self.logger.info(
+                                    f"  批次 {batch_idx + 1}/{n_batches} evidence 为空，已清除 answer 中的引用标记"
+                                )
+                            break  # 校验通过（已清除引用）
+
+                        # 校验 local 一致性：batch_citations 和 batch_answer
+                        problems = self._validate_citations_consistency(batch_answer, batch_citations)
+                        if not problems:
+                            # 校验通过，计算全局编号
+                            ev_start = len(all_evidence)
+                            all_evidence.extend(batch_evidence)
+
+                            local_to_global: dict[str, str] = {}
+                            for local_idx, c in enumerate(batch_citations):
+                                old_id = c["citation_id"]
+                                global_idx = ev_start + local_idx
+                                local_to_global[old_id] = f"#{global_idx + 1}"
+
+                            # 替换 answer 中的 local [#N] 为全局 [#N]
+                            global_answer = batch_answer
+                            for c in batch_citations:
+                                old_id = c["citation_id"]
+                                new_id = local_to_global[old_id]
+                                if new_id != old_id:
+                                    global_answer = re.sub(
+                                        re.escape(old_id) + r'(?=[^#\d]|$)',
+                                        new_id,
+                                        global_answer,
+                                    )
+
+                            # 生成全局编号的 citations 副本
+                            global_citations = []
+                            for c in batch_citations:
+                                gc = dict(c)
+                                gc["citation_id"] = local_to_global[c["citation_id"]]
+                                global_citations.append(gc)
+                            break  # 校验通过
+
+                        if self.logger:
+                            self.logger.warning(
+                                f"  批次 {batch_idx + 1}/{n_batches} 引用一致性校验不通过"
+                                f"（第 {retry_attempt + 1}/{max_retries + 1} 次），"
+                                f"问题: {'; '.join(problems)}"
+                            )
+
+                        if retry_attempt >= max_retries:
+                            if self.logger:
+                                self.logger.warning(
+                                    f"  批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
+                                )
+                            break
+
+                        # 重试：让 LLM 修正引用
+                        retry_prompt = list(prompt_messages)
+                        retry_prompt.append({"role": "assistant", "content": json.dumps(parsed)})
+                        retry_prompt.append({
+                            "role": "user",
+                            "content": (
+                                f"⚠️ 引用一致性检查发现以下问题：\n"
+                                + "\n".join(f"  - {p}" for p in problems)
+                                + "\n\n请确保 answer 中使用的每个 [#N] 编号都在 evidence 的 citation_id 中存在，"
+                                "且每个 evidence 条目都在 answer 中被引用。"
+                                "请修正后重新输出完整的 JSON。"
+                            ),
+                        })
+                        try:
+                            parsed, llm_meta = self._call_llm_json(
+                                retry_prompt,
+                                f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}（引用修正 第{retry_attempt + 1}次）",
+                            )
+                            synthesis_llm_calls.append(llm_meta)
+                            batch_evidence = parsed.get("evidence", []) or []
+                            batch_answer = parsed.get("answer", "").strip()
+                            if not batch_answer:
+                                if self.logger:
+                                    self.logger.info(f"  批次 {batch_idx + 1}/{n_batches} 修正后仍无答案，跳过")
+                                break
+                            # 重新处理修正后的结果
+                            # 注意：all_evidence 尚未扩展（校验在扩展之前），所以重试时直接重新计算即可
+                            batch_citations, _ = self._build_citations_from_evidence(batch_evidence, batch)
+                            # 继续循环，再次校验（不计算全局编号，等校验通过后再算）
+                        except Exception as exc:
+                            if self.logger:
+                                self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 修正失败: {exc}")
+                            break
+                    else:
+                        # for-else: 循环正常结束（未 break）说明重试用尽仍未通过
+                        if self.logger:
+                            self.logger.warning(
+                                f"  批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
+                            )
+                        continue
+
+                    # 校验通过后，如果中途 break 出来但 problems 仍不为空，跳过
+                    if problems:
+                        continue
+
+                    video_results.append({
+                        **meta,
+                        "answer": batch_answer,
+                        "citations": batch_citations,
+                        "answer_global": global_answer,
+                        "citations_global": global_citations,
+                        "useful_segment_count": len(batch),
+                        "batch_count": n_batches,
+                    })
 
                     if self.logger:
                         self.logger.info(
@@ -1545,29 +1662,6 @@ class VideoKnowledgeQA:
                 except Exception as exc:
                     if self.logger:
                         self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 合成失败: {exc}")
-
-            # 合并同一视频的多个批次的答案
-            if len(video_answer_parts) == 1:
-                video_answer = video_answer_parts[0]
-            elif len(video_answer_parts) > 1:
-                video_answer = "\n---\n".join(video_answer_parts)
-            else:
-                video_answer = ""
-
-            video_citations, _ = self._build_citations_from_evidence(video_evidence, segs)
-            video_results.append({
-                **meta,
-                "answer": video_answer,
-                "citations": video_citations,
-                "useful_segment_count": len(segs),
-                "batch_count": n_batches,
-            })
-            all_evidence.extend(video_evidence)
-
-            if self.logger:
-                self.logger.info(
-                    f"直播 {live_id} 合成完成: 共 {len(video_evidence)} 条 evidence"
-                )
 
         # ---- 最终答案生成 ----
         # 方案：
@@ -1581,77 +1675,57 @@ class VideoKnowledgeQA:
         answer_videos = [vr for vr in video_results if vr["answer"]]
         if len(answer_videos) == 0:
             answer_text = "未找到与问题直接相关的片段，无法给出确定答案。"
-            citations, final_evidence = [], []
+            citations = []
         elif len(answer_videos) == 1:
-            answer_text = answer_videos[0]["answer"]
-            # 只用这个分组的 evidence 生成 citations
-            video_evidence = all_evidence  # 只有一个分组会写入 all_evidence
-            citations, final_evidence = self._build_citations_from_evidence(
-                [ev for vr in answer_videos for ev in (vr.get("citations", []) or [])],
-                useful_segments,
-            )
+            answer_text = answer_videos[0]["answer_global"]
+            citations = answer_videos[0]["citations_global"]
         else:
             # 多个分组有答案 → 先计算出全局最终 citations
             if self.logger:
                 self.logger.info(f"开始最终汇总合并，共 {len(answer_videos)} 个视频分组有答案")
 
-            # Step 1: 从所有分组的 evidence 生成最终 citation 表，建立映射
-            citations, final_evidence = self._build_citations_from_evidence(
-                all_evidence, useful_segments
-            )
-            # 多段引用：每个 citation 可能包含多个 segment，需要建立 segment_id → citation_id 映射
-            seg_to_final_citation: dict[str, str] = {}
-            for c in citations:
-                c_id = c["citation_id"]
-                segments_list = c.get("segments", []) or []
-                for seg_info in segments_list:
-                    seg_to_final_citation[seg_info["segment_id"]] = c_id
-                # 也保留旧的 segment_id 顶层字段映射（向后兼容）
-                if c.get("segment_id"):
-                    seg_to_final_citation.setdefault(c["segment_id"], c_id)
+            # Step 1: 合并所有分组的全局 citations 作为最终 citation 表
+            # 每个分组的 citations_global 已经是全局编号，直接拼接即可
+            citations = []
+            seen_cids: set[str] = set()
+            for vr in answer_videos:
+                for c in vr["citations_global"]:
+                    cid = c["citation_id"]
+                    if cid not in seen_cids:
+                        seen_cids.add(cid)
+                        citations.append(c)
 
-            # Step 2: 为每个分组重写其答案中的引用编号
+            # Step 2: 构建 video_summaries，直接使用预先生成的全局编号
+            # answer_global 和 citations_global 已在 per-video 循环中计算好
             video_summaries = []
             for idx, vr in enumerate(answer_videos, start=1):
-                # 替换答案中的旧 citation_id 为最终编号
-                raw_answer = vr["answer"]
-                remapped_answer = raw_answer
-                for old_c in vr.get("citations", []):
-                    old_id = old_c["citation_id"]
-                    # 尝试用旧 citation 引用的每个 segment_id 查找新的编号
-                    new_id = None
-                    segments_list = old_c.get("segments", []) or []
-                    for seg_info in segments_list:
-                        nid = seg_to_final_citation.get(seg_info["segment_id"])
-                        if nid:
-                            new_id = nid
-                            break
-                    if not new_id and old_c.get("segment_id"):
-                        new_id = seg_to_final_citation.get(old_c["segment_id"])
-                    if new_id and new_id != old_id:
-                        remapped_answer = remapped_answer.replace(old_id, new_id)
+                global_answer = vr["answer_global"]
+                global_citations = vr["citations_global"]
 
-                # 列出该分组实际引用的片段及其最终编号
+                # 列出该分组实际引用的所有 citations（使用全局编号）
                 evidence_lines = []
-                for c in vr.get("citations", []):
-                    # 找到该旧 citation 对应的最终编号
-                    final_id = None
+                for c in global_citations:
+                    cid = c["citation_id"]
+                    ctype = c.get("citation_type", "")
                     segments_list = c.get("segments", []) or []
+                    seg_lines = []
                     for seg_info in segments_list:
-                        nid = seg_to_final_citation.get(seg_info["segment_id"])
-                        if nid:
-                            final_id = nid
-                            break
-                    if not final_id and c.get("segment_id"):
-                        final_id = seg_to_final_citation.get(c["segment_id"], c["citation_id"])
-                    text_snippet = c.get("quoted_text", "")
-                    evidence_lines.append(f"  [{final_id}] (类型={c.get('citation_type', c.get('source_type', ''))}, 视频={c['video_title']}) {text_snippet}")
+                        stype = seg_info.get("source_type", "")
+                        user = seg_info.get("anchor_name", "")
+                        offset = seg_info.get("video_offset", "")
+                        text = seg_info.get("quoted_text", "")
+                        seg_lines.append(f"      [{stype}] 用户名={user} 偏移={offset} \"{text}\"")
+                    segs_text = "\n".join(seg_lines)
+                    evidence_lines.append(
+                        f"  [{cid}] 类型={ctype}\n"
+                        f"{segs_text}"
+                    )
                 evidence_text = "\n".join(evidence_lines) if evidence_lines else "  无直接引用片段"
 
                 video_summaries.append(
                     f"[视频 {idx}] 标题={vr.get('video_title', '')}, "
                     f"直播时间={vr.get('video_datetime', '')}\n"
-                    f"  答案：\n{remapped_answer}\n"
+                    f"  答案：\n{global_answer}\n"
                     f"  引用片段：\n{evidence_text}"
                 )
             summaries_text = "\n\n".join(video_summaries)
@@ -1683,6 +1757,7 @@ class VideoKnowledgeQA:
                         "6) 回答应客观、负责任，避免对主播造成不当误导或负面形象。\n"
                         "7) 引用格式必须严格遵守：一个中括号内只能有一个引用编号，格式如 [#1]、[#5]。"
                         "禁止使用 [#N-#M]（区间）、[#N, #M]（逗号）、[#N-M]（缺少#号）等非标准格式。\n"
+                        "8) 引用标记 [#N] 要紧贴所支持的分句之后，不要集中放到句子或段落末尾，更不要统一放到回答最后。\n"
                         "仅输出JSON，不要额外文本。"
                     ),
                 }
@@ -1702,9 +1777,25 @@ class VideoKnowledgeQA:
                 if self.logger:
                     self.logger.info(f"最终答案合并完成，答案长度={len(answer_text)}")
 
-                # 校验引用格式，不通过则让 LLM 修正
-                invalid_refs = self._validate_answer_citations(answer_text)
-                if invalid_refs:
+                # 校验引用格式，最多重试 5 次
+                # 注意：不校验引用一致性，因为合并 prompt 要求"去重"和"引用精简"，
+                # 合并后的 answer 可能只引用部分 citations，这是正常行为。
+                # 后续 _filter_citations_by_answer + _renumber_citations 会保证
+                # citations 列表只包含 answer 实际引用的条目。
+                max_merge_retries = 5
+                for merge_retry in range(max_merge_retries + 1):
+                    invalid_refs = self._validate_answer_citations(answer_text)
+
+                    if not invalid_refs:
+                        break  # 校验通过
+
+                    if merge_retry >= max_merge_retries:
+                        if self.logger:
+                            self.logger.warning(
+                                f"最终答案合并重试 {max_merge_retries} 次后仍不通过，使用当前结果"
+                            )
+                        break
+
                     correction_msg = (
                         "⚠️ 答案中的以下引用格式不符合要求，请修正：\n"
                         + "\n".join(f"  ❌ {r}" for r in invalid_refs)
@@ -1712,20 +1803,26 @@ class VideoKnowledgeQA:
                         "禁止使用 [#N-#M]（区间）、[#N, #M]（逗号）等非标准格式。"
                     )
                     if self.logger:
-                        self.logger.warning(f"最终答案合并引用格式不通过，重试: {invalid_refs}")
+                        self.logger.warning(f"最终答案合并引用格式不通过（第 {merge_retry + 1} 次），重试: {invalid_refs}")
                     retry_prompt = list(merge_prompt)
                     retry_prompt.append({"role": "assistant", "content": json.dumps({"answer": answer_text})})
                     retry_prompt.append({"role": "user", "content": correction_msg})
-                    parsed, merge_llm_meta = self._call_llm_json(retry_prompt, "最终答案合并（引用格式修正）")
+                    parsed, merge_llm_meta = self._call_llm_json(
+                        retry_prompt,
+                        f"最终答案合并（引用格式修正 第{merge_retry + 1}次）",
+                    )
                     if self.logger:
                         self.logger.debug("=== 最终答案合并 LLM 调用 - 修正后 Response ===")
                         self.logger.debug(json.dumps(parsed, ensure_ascii=False))
                     answer_text = (parsed.get("answer") or "").strip()
                     if not answer_text:
-                        raise ValueError("LLM修正后返回空答案")
+                        if self.logger:
+                            self.logger.warning("LLM修正后返回空答案，使用修正前结果")
+                        break
                     synthesis_llm_calls.append(merge_llm_meta)
                     if self.logger:
-                        self.logger.info(f"最终答案合并（修正后）完成，答案长度={len(answer_text)}")
+                        self.logger.info(f"最终答案合并（格式修正 第{merge_retry + 1}次）完成，答案长度={len(answer_text)}")
+                    # 继续循环，再次校验
             except Exception as exc:
                 if self.logger:
                     self.logger.warning(f"最终答案合并失败，回退到简单拼接: {exc}")
@@ -1823,6 +1920,47 @@ class VideoKnowledgeQA:
             if "#" in text and not allowed.match(text):
                 invalid.append(text)
         return invalid
+
+    @staticmethod
+    def _validate_citations_consistency(
+        answer: str, citations: list[dict[str, Any]]
+    ) -> list[str]:
+        """双向校验 answer 和 citations 的引用编号是否完全一致。
+
+        检查：
+        1. answer 中引用的 [#N] 是否全部在 citations 中存在（无缺失引用）
+        2. citations 中的编号是否全部在 answer 中被引用（无多余引用）
+
+        返回：问题描述列表，为空表示完全一致。
+        """
+        if not answer and not citations:
+            return []
+
+        import re
+        answer_refs: set[int] = set()
+        for m in re.finditer(r"\[#(\d+)\]", answer):
+            answer_refs.add(int(m.group(1)))
+
+        citation_ids: set[int] = set()
+        for c in citations:
+            try:
+                citation_ids.add(int(c.get("citation_id", "").lstrip("#")))
+            except (ValueError, AttributeError):
+                pass
+
+        problems: list[str] = []
+
+        # 方向1：answer 引用了 citations 中不存在的编号
+        missing = sorted(answer_refs - citation_ids)
+        if missing:
+            problems.append(f"answer 引用了不存在的编号: {', '.join(f'#{n}' for n in missing)}")
+
+        # 方向2：citations 中有编号未被 answer 引用
+        extra = sorted(citation_ids - answer_refs)
+        if extra:
+            problems.append(f"citations 中存在未被 answer 引用的编号: {', '.join(f'#{n}' for n in extra)}")
+
+        return problems
 
     @staticmethod
     def _filter_citations_by_answer(answer: str, citations: list[dict[str, Any]]) -> list[dict[str, Any]]:
