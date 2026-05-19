@@ -1007,15 +1007,20 @@ class VideoKnowledgeQA:
                     "片段列表（按视频内时间排序）：\n"
                     f"{context}\n\n"
                     "请输出JSON对象，格式为：\n"
-                    '{"answer":"...","evidence":[{"segment_id":"...","reason":"..."}]}\n'
+                    '{"answer":"...","evidence":[{"segment_ids":["...","..."],"citation_type":"...","reason":"..."}]}\n'
                     "要求：\n"
                     "1) answer用自然的语言回答，在引用证据时插入 [#N] 标记；\n"
                     "2) evidence必须包含所有**为答案提供了独特信息**的片段，即使是**间接的、部分的线索**也要收录；\n"
-                    "3) 每个evidence条目说明该片段如何支持答案，并注明是「主播自述」还是「主播转述」；\n"
-                    "4) evidence列表按时间顺序排列；\n"
-                    "5) **即使无法给出确定答案**：如果在片段中找到了**任何相关的间接线索**，也必须将这些片段放入evidence[]并说明其相关性；"
+                    "3) 每个evidence条目可以引用**一条或多条片段**（`segment_ids`数组），并给出该组作为一个整体的理由（`reason`）。"
+                    "对于由多个片段的组合才完整表达的意思，请将它们归入同一条evidence。\n"
+                    "4) `citation_type`字段填写该条evidence的类型，可选值：\n"
+                    "   - 「主播讲话」：仅包含主播讲话片段\n"
+                    "   - 「观众弹幕」：仅包含观众弹幕片段\n"
+                    "   - 「互动对话」：同时包含主播讲话和观众弹幕（显示对话互动关系）\n"
+                    "5) evidence列表按时间顺序排列；\n"
+                    "6) **即使无法给出确定答案**：如果在片段中找到了**任何相关的间接线索**，也必须将这些片段放入evidence[]并说明其相关性；"
                     "只有真正**毫无关联**的片段集合才返回空的 evidence[]。\n"
-                    "6) **仅输出JSON，不要额外文本**。"
+                    "7) **仅输出JSON，不要额外文本**。"
                 ),
             }
         ]
@@ -1079,26 +1084,57 @@ class VideoKnowledgeQA:
         citations: list[dict[str, Any]] = []
 
         for idx, item in enumerate(normalized_evidence, start=1):
-            sid = item.get("segment_id")
-            seg = id_to_seg.get(sid)
-            if not seg:
+            # 支持新格式 segment_ids 数组，以及向后兼容旧格式 segment_id 字符串
+            sids: list[str] = item.get("segment_ids", []) or []
+            if not sids:
+                sid = item.get("segment_id")
+                if sid:
+                    sids = [sid]
+            if not sids:
                 continue
-            citations.append(
-                {
-                    "citation_id": f"#{idx}",
-                    "segment_id": sid,
-                    "source_type": seg.source_label,
-                    "quoted_text": normalize_text(seg.text),
-                    "video_offset": seg.hhmmss,
-                    "absolute_time": seg.absolute_time,
-                    "source_file": seg.file_path,
-                    "video_path": seg.video_path,
-                    "video_title": seg.video_title,
-                    "anchor_name": seg.anchor_name,
-                    "live_id": seg.live_id,
-                    "reason": item.get("reason", ""),
-                }
-            )
+
+            segs = [id_to_seg.get(sid) for sid in sids if sid]
+            segs = [s for s in segs if s is not None]
+            if not segs:
+                continue
+
+            citation: dict[str, Any] = {
+                "citation_id": f"#{idx}",
+                "segments": [],
+                "citation_type": item.get("citation_type", ""),
+                "reason": item.get("reason", ""),
+            }
+            # 向后兼容：保留旧的 segment_id / quoted_text 等顶层字段
+            first = segs[0]
+            citation["segment_id"] = first.segment_id
+            citation["source_type"] = first.source_label
+            citation["quoted_text"] = normalize_text(first.text)
+            citation["video_offset"] = first.hhmmss
+            citation["absolute_time"] = first.absolute_time
+            citation["source_file"] = first.file_path
+            citation["video_path"] = first.video_path
+            citation["video_title"] = first.video_title
+            citation["anchor_name"] = first.anchor_name
+            citation["live_id"] = first.live_id
+
+            # 完整的多段信息
+            for s in segs:
+                citation["segments"].append(
+                    {
+                        "segment_id": s.segment_id,
+                        "source_type": s.source_label,
+                        "quoted_text": normalize_text(s.text),
+                        "video_offset": s.hhmmss,
+                        "absolute_time": s.absolute_time,
+                        "source_file": s.file_path,
+                        "video_path": s.video_path,
+                        "video_title": s.video_title,
+                        "anchor_name": s.anchor_name,
+                        "live_id": s.live_id,
+                    }
+                )
+
+            citations.append(citation)
         return citations, normalized_evidence
 
     def _synthesize_with_batches(
@@ -1463,16 +1499,28 @@ class VideoKnowledgeQA:
                 batch = segs[start:start + per_video_batch_size]
                 batch_label = f"{batch_idx + 1}/{n_batches}" if n_batches > 1 else ""
 
+                # Debug: 记录第一个视频中第一组的LLM输入输出
+                is_first_group = (video_idx == 1 and batch_idx == 0)
+
                 try:
+                    prompt_messages = self._build_group_synthesis_prompt(
+                        question,
+                        batch,
+                        group_info=group_info,
+                        batch_label=batch_label,
+                    )
+                    if is_first_group and self.logger:
+                        self.logger.debug("=== 分组处理首个 LLM 调用 - Prompt ===")
+                        self.logger.debug(prompt_messages[0].get("content", ""))
+
                     parsed, llm_meta = self._call_llm_json(
-                        self._build_group_synthesis_prompt(
-                            question,
-                            batch,
-                            group_info=group_info,
-                            batch_label=batch_label,
-                        ),
+                        prompt_messages,
                         f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}" if n_batches > 1 else f"直播 {live_id} 合成",
                     )
+
+                    if is_first_group and self.logger:
+                        self.logger.debug("=== 分组处理首个 LLM 调用 - Response ===")
+                        self.logger.debug(json.dumps(parsed, ensure_ascii=False))
                     batch_evidence = parsed.get("evidence", []) or []
                     batch_answer = parsed.get("answer", "").strip()
                     synthesis_llm_calls.append(llm_meta)
@@ -1543,10 +1591,16 @@ class VideoKnowledgeQA:
             citations, final_evidence = self._build_citations_from_evidence(
                 all_evidence, useful_segments
             )
-            # segment_id → 最终 citation_id (e.g. "#3")
+            # 多段引用：每个 citation 可能包含多个 segment，需要建立 segment_id → citation_id 映射
             seg_to_final_citation: dict[str, str] = {}
             for c in citations:
-                seg_to_final_citation[c["segment_id"]] = c["citation_id"]
+                c_id = c["citation_id"]
+                segments_list = c.get("segments", []) or []
+                for seg_info in segments_list:
+                    seg_to_final_citation[seg_info["segment_id"]] = c_id
+                # 也保留旧的 segment_id 顶层字段映射（向后兼容）
+                if c.get("segment_id"):
+                    seg_to_final_citation.setdefault(c["segment_id"], c_id)
 
             # Step 2: 为每个分组重写其答案中的引用编号
             video_summaries = []
@@ -1556,16 +1610,34 @@ class VideoKnowledgeQA:
                 remapped_answer = raw_answer
                 for old_c in vr.get("citations", []):
                     old_id = old_c["citation_id"]
-                    new_id = seg_to_final_citation.get(old_c["segment_id"])
+                    # 尝试用旧 citation 引用的每个 segment_id 查找新的编号
+                    new_id = None
+                    segments_list = old_c.get("segments", []) or []
+                    for seg_info in segments_list:
+                        nid = seg_to_final_citation.get(seg_info["segment_id"])
+                        if nid:
+                            new_id = nid
+                            break
+                    if not new_id and old_c.get("segment_id"):
+                        new_id = seg_to_final_citation.get(old_c["segment_id"])
                     if new_id and new_id != old_id:
                         remapped_answer = remapped_answer.replace(old_id, new_id)
 
                 # 列出该分组实际引用的片段及其最终编号
                 evidence_lines = []
                 for c in vr.get("citations", []):
-                    final_id = seg_to_final_citation.get(c["segment_id"], c["citation_id"])
+                    # 找到该旧 citation 对应的最终编号
+                    final_id = None
+                    segments_list = c.get("segments", []) or []
+                    for seg_info in segments_list:
+                        nid = seg_to_final_citation.get(seg_info["segment_id"])
+                        if nid:
+                            final_id = nid
+                            break
+                    if not final_id and c.get("segment_id"):
+                        final_id = seg_to_final_citation.get(c["segment_id"], c["citation_id"])
                     text_snippet = c.get("quoted_text", "")
-                    evidence_lines.append(f"  [{final_id}] (类型={c['source_type']}, 视频={c['video_title']}) {text_snippet}")
+                    evidence_lines.append(f"  [{final_id}] (类型={c.get('citation_type', c.get('source_type', ''))}, 视频={c['video_title']}) {text_snippet}")
                 evidence_text = "\n".join(evidence_lines) if evidence_lines else "  无直接引用片段"
 
                 video_summaries.append(
@@ -1606,7 +1678,13 @@ class VideoKnowledgeQA:
                 }
             ]
             try:
+                if self.logger:
+                    self.logger.debug("=== 最终答案合并 LLM 调用 - Prompt ===")
+                    self.logger.debug(merge_prompt[0].get("content", ""))
                 parsed, merge_llm_meta = self._call_llm_json(merge_prompt, "最终答案合并")
+                if self.logger:
+                    self.logger.debug("=== 最终答案合并 LLM 调用 - Response ===")
+                    self.logger.debug(json.dumps(parsed, ensure_ascii=False))
                 answer_text = (parsed.get("answer") or "").strip()
                 if not answer_text:
                     raise ValueError("LLM返回空答案")
