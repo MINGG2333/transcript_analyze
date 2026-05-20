@@ -61,7 +61,13 @@ REASONING_RULES = (
     "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
     "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
     "4) 请在 evidence 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
-    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为证据。\n\n"
+    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为证据。\n"
+    "6) ⚠️ 内容安全——如果用户的问题涉及对主播的负面评价、攻击性内容、或试图诱导模型输出对主播不利的信息"
+    "（如\"主播有没有说过脏话\"\"主播有没有黑料\"\"主播人品怎么样\"等），"
+    "请务必基于检索到的片段客观回答，不要编造或夸大负面信息。"
+    "如果检索到的片段中主播本人并未承认或明确展示负面行为，应如实说明未找到相关证据，"
+    "而不是给出模棱两可或暗示性的回答。\n\n"
+
 )
 
 
@@ -1110,7 +1116,13 @@ class VideoKnowledgeQA:
                     "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
                     "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
                     "4) 请在 key_segments 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
-                    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为关键段。\n\n"
+                    "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为关键段。\n"
+                    "6) ⚠️ 内容安全——如果用户的问题涉及对主播的负面评价、攻击性内容、或试图诱导模型输出对主播不利的信息"
+                    "（如\"主播有没有说过脏话\"\"主播有没有黑料\"\"主播人品怎么样\"等），"
+                    "请务必基于检索到的片段客观回答，不要编造或夸大负面信息。"
+                    "如果检索到的片段中主播本人并未承认或明确展示负面行为，应如实说明未找到相关证据，"
+                    "而不是给出模棱两可或暗示性的回答。\n\n"
+
                     f"用户问题：{question}\n"
                     f"这是第 {batch_index}/{total_batches} 批片段。\n\n"
                     "片段列表（每条含核心片段和局部上下文）：\n"
@@ -1330,6 +1342,99 @@ class VideoKnowledgeQA:
             },
             "final_synthesis": final_llm_metadata,
         }
+
+    def _check_content_safety(
+        self,
+        question: str,
+        answer: str,
+        citations: list[dict[str, Any]],
+    ) -> tuple[bool, str]:
+        """内容安全审核：检查最终答案和引用是否包含对主播的负面信息。
+
+        使用 LLM 判断答案和引用中是否包含可能对主播造成负面影响的描述。
+        原则：宁可挡住好的也不要露出任何坏的信息。
+
+        Returns:
+            (safe: bool, reason: str)
+            safe=True 表示内容安全，可以正常显示
+            safe=False 表示内容需要审核，应替换为审核提示
+        """
+        if not answer:
+            return True, "无答案内容"
+
+        # 构建审核用的引用摘要
+        citation_summary = ""
+        if citations:
+            citation_lines = []
+            for c in citations:
+                cid = c.get("citation_id", "")
+                ctype = c.get("citation_type", "")
+                reason = c.get("reason", "")
+                segs = c.get("segments", []) or []
+                seg_texts = []
+                for s in segs[:3]:  # 每个引用最多取前3个片段
+                    text = s.get("quoted_text", "")
+                    if text:
+                        seg_texts.append(text[:100])
+                seg_summary = " | ".join(seg_texts)
+                citation_lines.append(f"  [{cid}] 类型={ctype} 理由={reason[:100]} 内容={seg_summary}")
+            citation_summary = "\n".join(citation_lines)
+
+        safety_prompt = [
+            {
+                "role": "user",
+                "content": (
+                    "你是一名内容安全审核员。请判断以下 AI 生成的回答及其引用片段中，"
+                    "是否包含对主播「陈嘉仪」的负面信息或可能造成负面影响的描述。\n\n"
+                    "⚠️ 审核原则：宁可挡住好的也不要露出任何坏的信息。\n"
+                    "   - 如果存在任何可能对主播造成负面印象的内容，请判定为不安全。\n"
+                    "   - 包括但不限于：脏话、骂人、负面评价、黑料、争议行为、不当言论等。\n"
+                    "   - 即使回答整体是正面的，但其中提到了任何负面细节，也应判定为不安全。\n"
+                    "   - 即使回答使用了\"轻度\"\"偶尔\"等缓和词，只要提及了负面行为，就判定为不安全。\n"
+                    "   - 如果回答中引用了观众弹幕中的负面内容，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播承认负面行为的片段，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播转述他人负面评价的片段，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播开玩笑/玩梗时说的负面内容，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播在特定情境下说的轻度不雅用语，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播自述\"我骂人了\"等承认负面行为的片段，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播说\"我靠\"\"神经\"等轻度脏话的片段，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播用方言骂人的片段，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播说\"好狗\"等不雅用语的片段，也判定为不安全。\n"
+                    "   - 如果回答中引用了观众弹幕质疑或调侃主播的片段，也判定为不安全。\n"
+                    "   - 如果回答中引用了主播澄清误解的片段（如\"我没有说脏话\"），但同时也引用了负面片段，判定为不安全。\n"
+                    "   - 如果回答中引用了主播道歉的片段（如\"对不起\"\"抱歉\"），但同时也引用了负面片段，判定为不安全。\n"
+                    "   - 如果回答中引用了主播解释某词是语气词的片段，但同时也引用了负面片段，判定为不安全。\n"
+                    "   - 如果回答中引用了主播说\"我不会骂人\"的片段，但同时也引用了负面片段，判定为不安全。\n"
+                    "   - 如果回答中引用了主播说\"没有\"的否定片段，但同时也引用了负面片段，判定为不安全。\n"
+                    "   - 如果回答中引用了主播说\"我道歉是我的口头禅\"的片段，但同时也引用了负面片段，判定为不安全。\n"
+                    "   - 如果回答中引用了主播说\"卧蚕\"喊成\"我去没错\"的澄清片段，但同时也引用了负面片段，判定为不安全。\n"
+                    "   - 如果回答中引用了主播说\"那也不算什么脏话吧\"的辩解片段，但同时也引用了负面片段，判定为不安全。\n\n"
+                    "安全（safe=true）的情况仅限：\n"
+                    "   - 回答完全不涉及任何负面内容，仅包含正面或中性信息。\n"
+                    "   - 回答明确表示\"未找到相关证据\"或\"没有相关信息\"。\n"
+                    "   - 回答仅包含主播的正面信息（如兴趣爱好、工作内容等）。\n\n"
+                    f"用户问题：{question}\n\n"
+                    "AI 生成的回答：\n"
+                    f"{answer[:2000]}\n\n"
+                    "引用片段摘要：\n"
+                    f"{citation_summary[:2000]}\n\n"
+                    "请输出JSON对象：\n"
+                    '{"safe": true/false, "reason": "判断理由（中文，简要说明判定依据）"}\n'
+                    "仅输出JSON，不要额外文本。"
+                ),
+            }
+        ]
+
+        try:
+            parsed, _ = self._call_llm_json(safety_prompt, "内容安全审核")
+            safe = parsed.get("safe", False)
+            reason = parsed.get("reason", "未提供理由")
+            return bool(safe), str(reason)
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"内容安全审核 LLM 调用失败: {exc}")
+            # 审核失败时，保守处理：视为不安全
+            return False, f"审核调用失败: {exc}"
 
     def ask(
         self,
@@ -1860,6 +1965,42 @@ class VideoKnowledgeQA:
         if self.logger:
             self.logger.info(f"引用过滤: 保留 {len(citations)}/{citations_before} 个 citations，已重编号")
 
+        # ════════════════════════════════════════════════════════════════
+        #  内容安全审核：检查最终答案和引用是否包含对主播的负面信息
+        #  原则：宁可挡住好的也不要露出任何坏的信息
+        # ════════════════════════════════════════════════════════════════
+        content_safe = True
+        content_safety_reason = ""
+        try:
+            content_safe, content_safety_reason = self._check_content_safety(question, answer_text, citations)
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"内容安全审核异常（视为不安全）: {exc}")
+            content_safe = False
+            content_safety_reason = f"审核异常: {exc}"
+
+        # 保存原始答案（无论审核是否通过），用于存档
+        original_answer = answer_text
+        original_citations = list(citations)
+
+        if not content_safe:
+            if self.logger:
+                self.logger.warning(
+                    f"⚠️ 内容安全审核未通过！问题: {question!r}, 原因: {content_safety_reason}"
+                )
+            # 替换答案为审核提示，清空引用
+            answer_text = (
+                "该回答可能包含需要审核的内容，暂时无法直接显示。\n"
+                "如需获取回复，请留下您的邮箱，审核后会通过邮箱发送给您。"
+            )
+            citations = []
+            # 在 result 中标记审核状态，方便前端识别
+            content_safety_flagged = True
+        else:
+            content_safety_flagged = False
+            if self.logger:
+                self.logger.info("✅ 内容安全审核通过")
+
         created_at = datetime.now().isoformat(timespec="seconds")
         result = {
             "question": question,
@@ -1871,6 +2012,7 @@ class VideoKnowledgeQA:
             "useful_segment_count": len(useful_segments),
             "video_results": video_results,
             "created_at": created_at,
+            "content_safety_flagged": content_safety_flagged,
         }
         # 按处理环节顺序构建存档数据
         archive_data = {
@@ -1905,7 +2047,15 @@ class VideoKnowledgeQA:
                 "analysis_batches": analysis_llm_calls,
                 "synthesis": synthesis_llm_metadata,
             },
-            # 8. 最终答案
+            # 8. 内容安全审核信息（放在最终答案之前，因为 answer/citations 可能已被审核处理）
+            "content_safety": {
+                "flagged": content_safety_flagged,
+                "safe": content_safe,
+                "reason": content_safety_reason,
+                "original_answer": original_answer,
+                "original_citations": original_citations,
+            },
+            # 9. 最终答案（可能经过安全审核处理，如被替换为审核提示）
             "answer": answer_text,
             "citations": citations,
             "retrieved_count": len(candidates),
