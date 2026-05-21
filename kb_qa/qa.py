@@ -1991,8 +1991,10 @@ class VideoKnowledgeQA:
             # 替换答案为审核提示，清空引用
             answer_text = (
                 "该回答可能包含需要审核的内容，暂时无法直接显示。\n"
+                "由于 AI 输出有不确定性风险，为保证网站合规和内容安全，采取较保守的内容展示策略。\n"
                 "如需获取回复，请留下您的邮箱，审核后会通过邮箱发送给您。"
             )
+
             citations = []
             # 在 result 中标记审核状态，方便前端识别
             content_safety_flagged = True
