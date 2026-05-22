@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
+from enum import IntEnum
 import hashlib
+
+
+class RiskLevel(IntEnum):
+    """内容安全审核风险等级（值越大风险越高）。"""
+    SAFE = 0    # 安全：日常对话、玩笑、圈内文化、主播个性表达 → 直接展示
+    LOW = 1     # 低风险：轻微吐槽、负面情绪表达，但无主观恶意 → 展示
+    MEDIUM = 2  # 中风险：可能引起争议的内容 → 拦截不展示
+    HIGH = 3    # 高风险：明确脏话、人身攻击、违法信息、涉政涉黄涉暴 → 拦截不展示
 
 
 @dataclass
