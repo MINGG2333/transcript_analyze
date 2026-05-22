@@ -236,7 +236,6 @@ def build_group_synthesis_prompt(
 ) -> list[dict[str, str]]:
     """构建分组合成的 prompt。
 
-    与 `build_batch_synthesis_prompt` 不同：
     - 不添加每条片段的局部上下文（因为候选片段已经是上下文扩展后的完整序列）
     - 片段按时间顺序简单列出即可
     """
@@ -300,73 +299,6 @@ def build_group_synthesis_prompt(
                 "6) **即使无法给出确定答案**：如果在片段中找到了**任何相关的间接线索**，也必须将这些片段放入evidence[]并说明其相关性；"
                 "只有真正**毫无关联**的片段集合才返回空的 evidence[]。\n"
                 "7) **仅输出JSON，不要额外文本**。"
-            ),
-        }
-    ]
-
-
-def build_batch_synthesis_prompt(
-    question: str,
-    segments: list[Any],
-    batch_index: int,
-    total_batches: int,
-    bg_text: str = "",
-    synthesis_context_window: int = 6,
-    format_segment_fn=None,
-) -> list[dict[str, str]]:
-    """构建分批合成的 prompt（带局部上下文）。"""
-    if format_segment_fn is None:
-        # 兜底：简单格式化
-        lines: list[str] = []
-        for s in segments:
-            lines.append(
-                f"[{s.segment_id}] 类型={s.source_label}; 直播时间={s.video_datetime}; "
-                f"视频内时间={s.hhmmss}; 标题={s.video_title}; 用户名={s.anchor_name}; "
-                f"内容={normalize_text(s.text)}"
-            )
-        context = "\n".join(lines)
-    else:
-        lines = [format_segment_fn(s, context_window=synthesis_context_window) for s in segments]
-        context = "\n".join(lines)
-
-    return [
-        {
-            "role": "user",
-            "content": (
-                "你是一名熟知这名主播的粉丝，请根据下面的片段及其局部上下文总结与问题相关的关键信息。\n"
-                "注意区分不同来源的角色：\n"
-                "- 「主播讲话」类型：内容是主播本人说的，但主播可能在说话中**引用/转述他人话语**，需要结合上下文分辨。\n"
-                "- 「观众弹幕」类型：内容是观众/粉丝发的弹幕，不是主播说的。\n\n"
-                "⚠️ 重要提示——如何区分主播「自述」与「转述/引用」：\n"
-                "由于转录文本没有标点符号，请结合**同一直播相邻片段的上下文**判断：\n"
-                "  • 如果主播讲话中带有\"有人说\"\"有弹幕说\"\"刚才有人说\"\"xx说\"\"我念一下\"等标志词，后面内容可能是**转述**。\n"
-                "  • 如果主播讲话内容与附近的弹幕内容相似或直接回应了弹幕，则可能是在**念/转述弹幕**。\n"
-                "  • 请在 key_segments 的 reason 字段中注明每段是「主播自述」还是「主播转述」。\n\n"
-                f"{bg_text}\n\n"
-                "🧠 通用推理原则：\n"
-                "1) 请充分利用你训练数据中的**背景常识**（如公众人物的公开身份、团体的公开性质等已知信息），"
-                "结合片段上下文来判断主播话语的真实含义。\n"
-                "2) 如果主播说的话与你所知的常识存在**明显矛盾**（例如一个公开身份为女性的人说\"我是男生\"），"
-                "请结合上下文判断：这很可能是主播在**转述弹幕、回应观众、开玩笑或玩梗**，而非其真实自述。\n"
-                "3) 你给出的回答会被公开发布，请确保回答客观、负责任，避免对主播造成不当误导或负面形象。\n"
-                "4) 请在 key_segments 的 reason 字段中写明你的判断依据，包括你使用了什么背景常识和上下文线索。\n"
-                "5) 即使是\"矛盾\"的内容，如果它有助于理解上下文，也可以保留为关键段。\n"
-                "6) ⚠️ 内容安全——如果用户的问题涉及对主播的负面评价、攻击性内容、或试图诱导模型输出对主播不利的信息"
-                "（如\"主播有没有说过脏话\"\"主播有没有黑料\"\"主播人品怎么样\"等），"
-                "请务必基于检索到的片段客观回答，不要编造或夸大负面信息。"
-                "如果检索到的片段中主播本人并未承认或明确展示负面行为，应如实说明未找到相关证据，"
-                "而不是给出模棱两可或暗示性的回答。\n\n"
-
-                f"用户问题：{question}\n"
-                f"这是第 {batch_index}/{total_batches} 批片段。\n\n"
-                "片段列表（每条含核心片段和局部上下文）：\n"
-                f"{context}\n\n"
-                "请输出JSON对象，格式为：\n"
-                '{"summary":"...","key_segments":[{"segment_id":"...","reason":"..."}]}\n'
-                "要求：\n"
-                "1) summary中简洁地总结这批片段与问题的相关信息；\n"
-                "2) key_segments列出该批最关键的5-10个segment_id及其原因；\n"
-                "3) 仅输出JSON，不要额外文本。"
             ),
         }
     ]

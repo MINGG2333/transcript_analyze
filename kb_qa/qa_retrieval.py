@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 from .indexer import BM25Index
 from .models import Segment
-from .name_normalizer import normalize_text, normalize_segments_text
+from .name_normalizer import normalize_segments_text
 from .parsers import collect_segments
 from .qa_prompts import build_bm25_refinement_prompt, build_vector_refinement_prompt
 from .qa_utils import call_llm_json

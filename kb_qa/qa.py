@@ -19,20 +19,13 @@ from .models import RiskLevel
 
 # ── 从子模块导入模块级函数（作为类方法绑定） ──
 from .qa_retrieval import (
-    get_bm25,
-    generate_kb_description,
     load_kb_description,
     build_or_update,
     retrieve,
-    refine_vector_query,
-    refine_bm25_query,
 )
 from .qa_analysis import (
     build_kb_background_text,
-    format_segment_with_local_context,
-    analyze_candidates,
     build_citations_from_evidence,
-    synthesize_with_batches,
     build_merge_prompt,
 )
 from .qa_safety import check_content_safety
@@ -45,50 +38,19 @@ from .qa_utils import (
     archive_result,
     ensure_client,
 )
-from .qa_prompts import (
-    ANSWER_STYLE_RULES,
-    CITATION_FORMAT_RULES,
-    SOURCE_DISTINCTION_RULES,
-    REASONING_RULES,
-    build_judge_prompt,
-)
+from .qa_prompts import build_judge_prompt
 
 
 class VideoKnowledgeQA:
     """直播视频知识库问答系统的主类。"""
 
     # ── 从子模块导入的方法（作为类属性绑定） ──
-    # 检索逻辑
-    get_bm25 = get_bm25
-    _generate_kb_description = generate_kb_description
     _load_kb_description = load_kb_description
     build_or_update = build_or_update
     retrieve = retrieve
-    _refine_vector_query = refine_vector_query
-    _refine_bm25_query = refine_bm25_query
-
-    # 分析与合成
     _build_kb_background_text = build_kb_background_text
-    _format_segment_with_local_context = format_segment_with_local_context
-    _analyze_candidates = analyze_candidates
     _build_citations_from_evidence = build_citations_from_evidence
-    _synthesize_with_batches = synthesize_with_batches
-
-    # 内容安全审核
     _check_content_safety = check_content_safety
-
-    # 工具函数（类方法直接引用）
-    _call_llm_json = staticmethod(call_llm_json)
-    _validate_answer_citations = staticmethod(validate_answer_citations)
-    _validate_citations_consistency = staticmethod(validate_citations_consistency)
-    _filter_citations_by_answer = staticmethod(filter_citations_by_answer)
-    _renumber_citations = staticmethod(renumber_citations)
-
-    # Prompt 常量
-    ANSWER_STYLE_RULES = ANSWER_STYLE_RULES
-    CITATION_FORMAT_RULES = CITATION_FORMAT_RULES
-    SOURCE_DISTINCTION_RULES = SOURCE_DISTINCTION_RULES
-    REASONING_RULES = REASONING_RULES
 
     def __init__(
         self,
