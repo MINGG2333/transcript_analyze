@@ -109,17 +109,56 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _load_env_file() -> bool:
+    """从多个候选位置依次尝试加载 .env 文件。
+
+    查找顺序（优先级由高到低）：
+      1. 当前工作目录 (os.getcwd())
+      2. 脚本所在目录 (transcript_analyze/)
+      3. 项目根目录 (snh48_web/)
+
+    返回 True 表示至少成功加载了一个 .env 文件。
+    """
+    candidates = [
+        Path.cwd() / ".env",
+        _SCRIPT_DIR / ".env",
+        _SCRIPT_DIR.parent / ".env",       # snh48_web/.env
+    ]
+    # 去重（如果多个路径指向同一个文件则只加载一次）
+    seen: set[Path] = set()
+    loaded = False
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        if resolved.exists():
+            load_dotenv(resolved, override=False)
+            loaded = True
+    return loaded
+
+
 def main() -> None:
     # ── 自动加载 .env 文件 ──────────────────────────────────────────────
-    # 从当前目录向上查找 .env，支持 snh48_web/.env
-    env_loaded = load_dotenv(override=False)
-    if not env_loaded:
-        # 如果当前目录没找到，尝试从脚本所在项目的根目录加载
-        project_root = _SCRIPT_DIR.parent  # transcript_analyze/.. => snh48_web/
-        env_loaded = load_dotenv(project_root / ".env", override=False)
+    # 从当前工作目录 / transcript_analyze/ / snh48_web/ 依次查找 .env
+    _load_env_file()
 
     args = build_parser().parse_args()
     logger = setup_logger(debug=args.debug)
+
+    # ── API Key 安全检查 ──────────────────────────────────────────────
+    final_api_key = args.api_key or os.getenv("DEEPSEEK_API_KEY")
+    if not final_api_key:
+        logger.error(
+            "未配置 DeepSeek API Key！\n\n"
+            "请通过以下任一方式配置：\n"
+            f"  1. 复制 {_SCRIPT_DIR / '.env.example'} 为 {_SCRIPT_DIR / '.env'}，"
+            "填入你的 DEEPSEEK_API_KEY\n"
+            "  2. 设置环境变量: export DEEPSEEK_API_KEY=sk-xxx\n"
+            "  3. 命令行参数: --api-key sk-xxx\n"
+        )
+        sys.exit(1)
+
     qa = VideoKnowledgeQA(
         records_path=Path(args.records),
         subtitle_root=Path(args.subtitle_root),
@@ -127,7 +166,7 @@ def main() -> None:
         embedding_model=args.embedding_model,
         llm_model=args.llm_model,
         api_base=args.api_base,
-        api_key=args.api_key,
+        api_key=final_api_key,
         logger=logger,
     )
 

@@ -7,3 +7,7 @@ firered_output_batch/
 video_knowledge_db*/
 
 *.log
+
+# Environment (defense in depth — also covered by root .gitignore)
+.env
+.env.local
