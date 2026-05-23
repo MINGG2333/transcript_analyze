@@ -5,35 +5,61 @@
 ```
 ask(question)
   │
-  ├─ 0. 加载知识库描述 (_load_kb_description / _build_kb_background_text)
-  │     [无LLM调用]
+  ├─ Phase A: 检索（串行，但改写查询可后续优化为并行）
+  │   ├─ a. 加载知识库描述
+  │   │     [无LLM调用]
+  │   │
+  │   ├─ b. 向量查询改写 (_refine_vector_query)
+  │   │     [LLM调用 #1]
+  │   │
+  │   ├─ c. 向量索引检索 (vector.retrieve)
+  │   │     [无LLM调用] 用改写后的查询做语义搜索
+  │   │
+  │   ├─ d. BM25查询改写 (_refine_bm25_query)
+  │   │     [LLM调用 #2]
+  │   │
+  │   ├─ e. BM25索引检索 (bm25.retrieve)
+  │   │     [无LLM调用] 用关键词做词频搜索
+  │   │
+  │   ├─ f. 合并向量+BM25结果
+  │   │     [无LLM调用] 向量全保留，BM25补充
+  │   │
+  │   └─ g. 上下文扩展 (expand_context)
+  │         [无LLM调用] 给基段加同场前后片段
   │
-  ├─ 1. 向量查询改写 (_refine_vector_query)
-  │     [LLM调用 #1] 如"陈嘉仪是什么性别" → "这个人的性别是什么？"
-  │
-  ├─ 2. 向量索引检索 (vector.retrieve)
-  │     [无LLM调用] 用改写后的查询做语义搜索
-  │
-  ├─ 3. BM25查询改写 (_refine_bm25_query)
-  │     [LLM调用 #2] 提取关键词 "性别"
-  │
-  ├─ 4. BM25索引检索 (bm25.retrieve)
-  │     [无LLM调用] 用关键词做词频搜索
-  │
-  ├─ 5. 合并向量+BM25结果
-  │     [无LLM调用] 向量全保留，BM25补充
-  │
-  ├─ 6. 上下文扩展 (expand_context)
-  │     [无LLM调用] 给基段加同场前后片段
-  │
-  ├─ [跳过] 候选片段有用性分析 (_analyze_candidates)
+  ├─ [跳过] 候选片段有用性分析
   │     [已被跳过，方案C]
   │
-  ├─ 7. 分组合成 (per-video batch synthesis)
-  │     [LLM调用 #3 ~ #N] 每个视频每批合成一次
+  ├─ Phase B: 分组合成（并发 ⚡）
+  │   │   ThreadPoolExecutor(max_workers=10)
+  │   │   各视频分组互不依赖，并发处理
+  │   │
+  │   ├─ 视频组1 ──→ _process_video_group()
+  │   │                ├─ batch1: [LLM调用 #3] 
+  │   │                ├─ batch2: [LLM调用 #4] (如有)
+  │   │                └─ ... (含 citation 校验重试)
+  │   ├─ 视频组2 ──→ _process_video_group()
+  │   ├─ ...
+  │   └─ 视频组N ──→ _process_video_group()
   │
-  └─ 8. 最终答案合并 (merge)
-        [LLM调用 #N+1] 仅当多个视频分组都有答案时触发
+  ├─ Phase C: 串行后处理（全局引用编码）
+  │   │   [无LLM调用] 按原始时间顺序遍历各组结果，
+  │   │   分配全局连续的 citation 编号
+  │
+  ├─ Phase D: 最终答案合并
+  │     [LLM调用 #N+1] 仅当多个视频分组都有答案时触发
+  │
+  └─ Phase E: 内容安全审核 (check_content_safety)
+        [LLM调用 #N+2] 对最终答案做四级风险判定
+  
+  LLM总调用次数 ≈ 2（改写）+ 视频分组数 + 0~1（合并）+ 1（安全审核）
+  并发阶段：ThreadPoolExecutor(max_workers=10)，组间并发
+
+  max_tokens 策略：
+  - 查询改写：50（简短JSON，配合prompt“控制在50字以内”）
+  - 分组合成/合并：不限制（需输出完整 answer + evidence）
+  - 安全审核/KB描述：300（简单JSON）
+  思考模式：关闭 `extra_body={"thinking": {"type": "disabled"}}`
 ```
 
 ---
@@ -122,47 +148,77 @@ ask(question)
 
 ---
 
-### 环节7：分组合成（核心 LLM 环节）
-- **函数**：`ask() 内部的合成循环`
+### 环节7：分组合成（核心 LLM 环节）⚡
+- **函数**：`_process_video_group()` + `ThreadPoolExecutor(max_workers=10)`
 - **LLM**：✅ 是（可能多次）
+- **执行模式**：**组间并发**（所有视频分组通过 `ThreadPoolExecutor` 同时提交），**组内串行**（每个视频分组内部的批处理 + citation 校验重试保持顺序）
 - **触发条件**：每个直播视频的候选片段，每 500 条为一批，每批一次 LLM 调用
-- **进度日志**：`[1/20] 处理直播 1213958151848398848（想泥萌）...`
+- **进度日志**：`[1/20] 处理直播 1213958151848398848（想泥萌）...`（并发下日志交错输出）
 - **输入**：
   - 用户问题
   - 一批候选片段（按视频内时间排序，简单列出，不加局部上下文）
   - 视频元信息（标题、时间、主播）
-- **输出**：`{"answer": "...", "evidence": [{"segment_id": "...", "reason": "..."}]}`
-- **存档状态**：
-  - `llm_calls.synthesis.calls[]` ✅ — 每批的 LLM 元数据
-  - `video_results[]` ✅ — 每个视频的答案和引用
-  - **注意**：当一个视频有多个批次时，各批的 answer 用 `\n---\n` 简单拼接
+- **输出（局部结果）**：
+  ```
+  {
+    "meta": {...},               # 视频元信息
+    "batches": [                 # 每个成功批次的局部结果
+      {
+        "answer": str,           # answer（含原始 LLM 分配的 citation 编号）
+        "citations": list,       # citations（含原始 LLM 分配的编号）
+        "evidence": list,        # 原始 evidence
+        "useful_segment_count": int,
+        "batch_count": int,
+      },
+    ],
+    "llm_calls": [...],          # 本组所有 LLM 调用元数据
+  }
+  ```
+- **并发控制**：`max_workers=10`，DeepSeek v4-flash 支持 2500 并发，10 路并发远低于限值，无需担心 429
+- **注意**：并行阶段**不做全局引用编码**，全局编号在 Phase C 串行后处理中完成
 
 ---
 
-### 环节8：最终答案合并（新增）
-- **函数**：`ask() 内的 merge 逻辑`
+### 环节8：最终答案合并
+- **函数**：`ask()` 内的 merge 逻辑
 - **LLM**：✅ 是（仅当多个视频分组都有答案时触发；仅一个分组有答案时直接使用）
 - **触发条件**：`len(answer_videos) > 1`
-- **处理流程**：
-  ```
-  Step 1: 从所有分组的 evidence 生成全局最终 citations 表
-          _build_citations_from_evidence(all_evidence, useful_segments)
-          → citations = [#1, #2, #3, ...]
-  
-  Step 2: 建立映射 segment_id → 最终 citation_id
-          "1246610960334786560_speech_..." → "#3"
-  
-  Step 3: 将每个分组答案中的旧 #N 替换为最终 #N
-  
-  Step 4: 构建每个分组的完整答案 + 引用列表（最终编号），输入给merge LLM
-  
-  Step 5: LLM 合并各分组答案，去重后输出一条连贯答案
-  ```
+
+#### Phase C：串行后处理（全局引用编码）
+在并发合成的所有视频组都完成后，按**原始视频时间顺序**依次处理每组结果：
+
+```
+Step 1: 遍历各组（按时间顺序）
+Step 2: 对每组每批，构建局部→全局编号映射
+        local_to_global = { "#1" → "#5", "#2" → "#6", ... }
+        其中全局偏移量 = 已处理的 evidence 总数
+Step 3: 替换 answer 中的局部编号为全局编号
+Step 4: 更新 citations 中的 citation_id 为全局编号
+Step 5: 累加 evidence 到全局列表，更新偏移量
+Step 6: 构建 video_results（格式与改造前完全一致）
+```
+
+#### Phase D：合并 LLM
+```
+Step 7: 从所有分组的 global citations 去重构建最终 citations 表
+Step 8: 构建每个分组的完整答案 + 引用列表（最终编号），输入给 merge LLM
+Step 9: LLM 合并各分组答案，去重后输出一条连贯答案
+Step 10: 如果引用格式不通过，最多重试 5 次修正
+```
 - **回退策略**：合并 LLM 失败时回退到 `\n\n---\n\n` 简单拼接
 - **存档状态**：
   - `synthesis_llm_calls` 中新增一次 merge LLM 调用元数据
   - `answer` — 合并后的最终答案
   - `citations` — 全局统一编号的引用列表
+
+---
+
+### 环节9：内容安全审核（新增）
+- **函数**：`_check_content_safety(question, answer, citations)`
+- **LLM**：✅ 是
+- **触发条件**：始终执行（在最终答案生成之后）
+- **风险等级**：四级风险（SAFE/LOW/MEDIUM/HIGH），仅拦截 MEDIUM 和 HIGH
+- **回退策略**：审核调用失败时默认判为 MEDIUM（保守拦截）
 
 ---
 
@@ -221,7 +277,19 @@ ask(question)
 | Merge阶段缺少"结合上下文推测" | 🔷 低 — 分组阶段已完成 | 同上 |
 | Merge阶段不要求输出 evidence 的 reason | 🔵 设计如此 — 无需修改 | merge 只合并 answer，evidence 已在分组阶段保留 |
 
-**结论**：当前 pipeline 基本满足所有要求。merge prompt 在 `1.15` 更新后已补充了"粉丝立场""引用精简""避免负面形象"，唯一未覆盖的是"常识矛盾检测"和"结合上下文推测"——但这属于低风险项，因为分组阶段已完成推理。
+**结论**：当前 pipeline 基本满足所有要求。merge prompt 更新后已补充了"粉丝立场""引用精简""避免负面形象"，唯一未覆盖的是"常识矛盾检测"和"结合上下文推测"——但这属于低风险项，因为分组阶段已完成推理。
+
+---
+
+### 六、内容安全审核（新增）
+
+| 要求 | 审核阶段 (环节9) | 说明 |
+|---|---|---|
+| 四级风险分类 | ✅ SAFE/LOW/MEDIUM/HIGH | 取代旧版二值判定 |
+| 拦截策略 | ✅ 仅拦截 MEDIUM 和 HIGH | LOW 和 SAFE 放行 |
+| 判断指南 | ✅ 含5条详细指南 | 区分恶意攻击/日常表达、粉丝文化/真实负面、转述/自述、字面负面/真实意图、否定澄清类内容 |
+| 失败处理 | ✅ 默认判为 MEDIUM | 保守拦截，避免漏判 |
+| 存档状态 | ✅ content_safety 字段保留原始答案和引用 | 方便事后复审 |
 
 ---
 

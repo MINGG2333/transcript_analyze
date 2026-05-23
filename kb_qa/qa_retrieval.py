@@ -93,7 +93,8 @@ def generate_kb_description(self) -> str:
     try:
         self._ensure_client()
         parsed, _ = call_llm_json(
-            self.client, self.llm_model, prompt, "知识库描述生成", logger=self.logger
+            self.client, self.llm_model, prompt, "知识库描述生成",
+            max_tokens=300, logger=self.logger,
         )
         desc = (parsed.get("description") or "").strip()
         if desc:
@@ -224,6 +225,7 @@ def retrieve(
 ) -> tuple[list[Segment], dict[str, Any]]:
     if self.logger:
         self.logger.info("[1/6] 开始向量查询改写，辅助检索语句更聚焦语义")
+    # CHANGED: 可与下方 BM25 查询改写异步并发（asyncio.gather），两路 LLM 调用独立
     vector_query, vector_refinement = refine_vector_query(self, question)
     if self.logger:
         self.logger.info(f"[1/6] 向量查询改写完成，使用查询：{vector_query}")
@@ -273,6 +275,7 @@ def retrieve(
 
     if self.logger:
         self.logger.info("[3/6] 开始BM25查询改写，辅助检索语句更聚焦")
+    # CHANGED: 可与上方向量查询改写异步并发（asyncio.gather），两路 LLM 调用独立
     bm25_query, bm25_refinement = refine_bm25_query(self, question)
     if self.logger:
         self.logger.info(f"[3/6] BM25查询改写完成，使用查询：{bm25_query}")
@@ -470,7 +473,8 @@ def refine_vector_query(self, question: str) -> tuple[str, dict[str, Any]]:
 
     try:
         parsed, llm_metadata = call_llm_json(
-            self.client, self.llm_model, prompt_messages, "向量查询改写", logger=self.logger
+            self.client, self.llm_model, prompt_messages, "向量查询改写",
+            max_tokens=50, logger=self.logger,
         )
         refined = (parsed.get("refined_query") or "").strip()
         if not refined:
@@ -502,7 +506,8 @@ def refine_bm25_query(self, question: str) -> tuple[str, dict[str, Any]]:
 
     try:
         parsed, llm_metadata = call_llm_json(
-            self.client, self.llm_model, prompt_messages, "BM25 查询改写", logger=self.logger
+            self.client, self.llm_model, prompt_messages, "BM25 查询改写",
+            max_tokens=50, logger=self.logger,
         )
         refined = (parsed.get("refined_query") or "").strip()
         if not refined:

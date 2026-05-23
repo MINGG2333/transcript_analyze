@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -94,6 +95,187 @@ class VideoKnowledgeQA:
         if self.client is not None:
             return
         self.client = ensure_client(self.client, self.api_key, self.api_base, logger=self.logger)
+
+    def _process_video_group(
+        self,
+        question: str,
+        live_id: str,
+        segs: list,
+        meta: dict,
+        video_idx: int,
+        total_videos: int,
+        per_video_batch_size: int,
+    ) -> dict:
+        """并发处理单个视频分组。内部串行（含 citation 校验重试），返回局部结果。
+
+        返回格式：
+        {
+            "meta": {...},             # 视频元信息
+            "batches": [               # 每个成功批次的局部结果
+                {
+                    "answer": str,     # 原始 answer（含原始 LLM 分配的编号）
+                    "citations": list, # 原始 citations（含原始 LLM 分配的编号）
+                    "evidence": list,  # 原始 evidence
+                    "useful_segment_count": int,
+                    "batch_count": int,
+                },
+            ],
+            "llm_calls": [...],        # 本组所有 LLM 调用元数据
+        }
+        """
+        from .qa_prompts import build_group_synthesis_prompt
+
+        group_info = (
+            f"标题={meta.get('video_title', '')}, "
+            f"直播时间={meta.get('video_datetime', '')}, "
+            f"主播={meta.get('anchor_name', '')}"
+        )
+        total = len(segs)
+        n_batches = max(1, (total + per_video_batch_size - 1) // per_video_batch_size)
+
+        if self.logger:
+            self.logger.info(
+                f"[{video_idx}/{total_videos}] 处理直播 {live_id}（{meta.get('video_title', '')}），"
+                f"共 {total} 个片段，分 {n_batches} 批（每批最多 {per_video_batch_size} 条）"
+            )
+
+        batches_result: list[dict] = []
+        all_llm_calls: list[dict] = []
+
+        for batch_idx in range(n_batches):
+            start = batch_idx * per_video_batch_size
+            batch = segs[start:start + per_video_batch_size]
+            batch_label = f"{batch_idx + 1}/{n_batches}" if n_batches > 1 else ""
+            is_first_group = (video_idx == 1 and batch_idx == 0)
+
+            try:
+                bg_text = self._build_kb_background_text()
+                prompt_messages = build_group_synthesis_prompt(
+                    question, batch, group_info=group_info, batch_label=batch_label, bg_text=bg_text,
+                )
+                if is_first_group and self.logger:
+                    self.logger.debug("=== 分组处理首个 LLM 调用 - Prompt ===")
+                    self.logger.debug(prompt_messages[0].get("content", ""))
+
+                parsed, llm_meta = call_llm_json(
+                    self.client, self.llm_model, prompt_messages,
+                    f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}"
+                    if n_batches > 1 else f"直播 {live_id} 合成",
+                    logger=self.logger,
+                )
+
+                if is_first_group and self.logger:
+                    self.logger.debug("=== 分组处理首个 LLM 调用 - Response ===")
+                    self.logger.debug(json.dumps(parsed, ensure_ascii=False))
+                batch_evidence = parsed.get("evidence", []) or []
+                batch_answer = parsed.get("answer", "").strip()
+                all_llm_calls.append(llm_meta)
+
+                if not batch_answer:
+                    if self.logger:
+                        self.logger.info(f"  批次 {batch_idx + 1}/{n_batches} 无答案，跳过")
+                    continue
+
+                batch_citations, _ = self._build_citations_from_evidence(batch_evidence, batch)
+
+                max_retries = 5
+                problems: list[str] = []
+                final_answer = batch_answer
+                final_citations = list(batch_citations)
+                final_evidence = list(batch_evidence)
+
+                for retry_attempt in range(max_retries + 1):
+                    if not final_citations:
+                        final_answer = re.sub(r"\[\#\d+\]", "", batch_answer)
+                        final_citations = []
+                        if self.logger:
+                            self.logger.info(
+                                f"  批次 {batch_idx + 1}/{n_batches} evidence 为空，已清除引用标记"
+                            )
+                        break
+
+                    problems = validate_citations_consistency(final_answer, final_citations)
+                    if not problems:
+                        break
+
+                    if self.logger:
+                        self.logger.warning(
+                            f"  批次 {batch_idx + 1}/{n_batches} 引用一致性校验不通过"
+                            f"（第 {retry_attempt + 1}/{max_retries + 1} 次），"
+                            f"问题: {'; '.join(problems)}"
+                        )
+
+                    if retry_attempt >= max_retries:
+                        if self.logger:
+                            self.logger.warning(
+                                f"  批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
+                            )
+                        break
+
+                    retry_prompt = list(prompt_messages)
+                    retry_prompt.append({"role": "assistant", "content": json.dumps(parsed)})
+                    retry_prompt.append({
+                        "role": "user",
+                        "content": (
+                            f"⚠️ 引用一致性检查发现以下问题：\n"
+                            + "\n".join(f"  - {p}" for p in problems)
+                            + "\n\n请确保 answer 中使用的每个 [#N] 编号都在 evidence 的 citation_id 中存在，"
+                            "且每个 evidence 条目都在 answer 中被引用。"
+                            "请修正后重新输出完整的 JSON。"
+                        ),
+                    })
+                    try:
+                        parsed, llm_meta = call_llm_json(
+                            self.client, self.llm_model, retry_prompt,
+                            f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}（引用修正 第{retry_attempt + 1}次）",
+                            logger=self.logger,
+                        )
+                        all_llm_calls.append(llm_meta)
+                        batch_evidence = parsed.get("evidence", []) or []
+                        batch_answer = parsed.get("answer", "").strip()
+                        if not batch_answer:
+                            if self.logger:
+                                self.logger.info(f"  批次 {batch_idx + 1}/{n_batches} 修正后仍无答案，跳过")
+                            break
+                        final_citations, _ = self._build_citations_from_evidence(batch_evidence, batch)
+                        final_answer = batch_answer
+                        final_evidence = batch_evidence
+                    except Exception as exc:
+                        if self.logger:
+                            self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 修正失败: {exc}")
+                        break
+                else:
+                    if self.logger:
+                        self.logger.warning(
+                            f"  批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
+                        )
+                    continue
+
+                if problems:
+                    continue
+
+                batches_result.append({
+                    "answer": final_answer,
+                    "citations": final_citations,
+                    "evidence": final_evidence,
+                    "useful_segment_count": len(batch),
+                    "batch_count": n_batches,
+                })
+
+                if self.logger:
+                    self.logger.info(
+                        f"  批次 {batch_idx + 1}/{n_batches} 完成，"
+                        f"evidence={len(final_evidence)} 条"
+                    )
+            except Exception as exc:
+                if self.logger:
+                    self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 合成失败: {exc}")
+
+        return {
+            "meta": meta,
+            "batches": batches_result,
+            "llm_calls": all_llm_calls,
+        }
 
     def ask(
         self,
@@ -249,176 +431,97 @@ class VideoKnowledgeQA:
         total_videos = len(video_groups)
         if self.logger:
             self.logger.info(f"开始合成：共 {total_videos} 个视频，{len(useful_segments)} 个片段")
-        all_evidence: list[dict[str, Any]] = []
         video_results: list[dict[str, Any]] = []
         synthesis_llm_calls: list[dict[str, Any]] = []
 
-        from .qa_prompts import build_group_synthesis_prompt
+        # ── Phase B: 并发处理各视频分组 ──
+        # 所有视频分组相互独立，通过 ThreadPoolExecutor 并发处理
+        # 每个视频组内部保持串行（含 citation 校验重试），组间并发
+        # DeepSeek v4-flash 支持 2500 并发，视频分组通常 < 50 个，绰绰有余
+        MAX_CONCURRENT = 10
+        video_group_items = sorted(
+            video_groups.items(), key=lambda x: x[1][0].start_time if x[1] else 0
+        )
 
-        for video_idx, (live_id, segs) in enumerate(
-            sorted(video_groups.items(), key=lambda x: x[1][0].start_time if x[1] else 0), start=1
-        ):
-            meta = video_meta.get(live_id, {})
-            group_info = (
-                f"标题={meta.get('video_title', '')}, "
-                f"直播时间={meta.get('video_datetime', '')}, "
-                f"主播={meta.get('anchor_name', '')}"
-            )
-            total = len(segs)
-            n_batches = max(1, (total + per_video_batch_size - 1) // per_video_batch_size)
-
-            if self.logger:
-                self.logger.info(
-                    f"[{video_idx}/{total_videos}] 处理直播 {live_id}（{meta.get('video_title', '')}），"
-                    f"共 {total} 个片段，分 {n_batches} 批（每批最多 {per_video_batch_size} 条）"
+        group_raw_results: dict[str, dict] = {}
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
+            future_to_live = {}
+            for video_idx, (live_id, segs) in enumerate(video_group_items, start=1):
+                meta = video_meta.get(live_id, {})
+                future = executor.submit(
+                    self._process_video_group,
+                    question, live_id, segs, meta, video_idx, total_videos,
+                    per_video_batch_size,
                 )
+                future_to_live[future] = live_id
 
-            for batch_idx in range(n_batches):
-                start = batch_idx * per_video_batch_size
-                batch = segs[start:start + per_video_batch_size]
-                batch_label = f"{batch_idx + 1}/{n_batches}" if n_batches > 1 else ""
-                is_first_group = (video_idx == 1 and batch_idx == 0)
-
+            for future in as_completed(future_to_live):
+                live_id = future_to_live[future]
                 try:
-                    bg_text = self._build_kb_background_text()
-                    prompt_messages = build_group_synthesis_prompt(
-                        question, batch, group_info=group_info, batch_label=batch_label, bg_text=bg_text,
-                    )
-                    if is_first_group and self.logger:
-                        self.logger.debug("=== 分组处理首个 LLM 调用 - Prompt ===")
-                        self.logger.debug(prompt_messages[0].get("content", ""))
-
-                    parsed, llm_meta = call_llm_json(
-                        self.client, self.llm_model, prompt_messages,
-                        f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}"
-                        if n_batches > 1 else f"直播 {live_id} 合成",
-                        logger=self.logger,
-                    )
-
-                    if is_first_group and self.logger:
-                        self.logger.debug("=== 分组处理首个 LLM 调用 - Response ===")
-                        self.logger.debug(json.dumps(parsed, ensure_ascii=False))
-                    batch_evidence = parsed.get("evidence", []) or []
-                    batch_answer = parsed.get("answer", "").strip()
-                    synthesis_llm_calls.append(llm_meta)
-
-                    if not batch_answer:
-                        if self.logger:
-                            self.logger.info(f"  批次 {batch_idx + 1}/{n_batches} 无答案，跳过")
-                        continue
-
-                    batch_citations, _ = self._build_citations_from_evidence(batch_evidence, batch)
-
-                    max_retries = 5
-                    for retry_attempt in range(max_retries + 1):
-                        if not batch_citations:
-                            global_answer = re.sub(r"\[\#\d+\]", "", batch_answer)
-                            global_citations = []
-                            if self.logger:
-                                self.logger.info(
-                                    f"  批次 {batch_idx + 1}/{n_batches} evidence 为空，已清除引用标记"
-                                )
-                            break
-
-                        problems = validate_citations_consistency(batch_answer, batch_citations)
-                        if not problems:
-                            ev_start = len(all_evidence)
-                            all_evidence.extend(batch_evidence)
-                            local_to_global: dict[str, str] = {}
-                            for local_idx, c in enumerate(batch_citations):
-                                old_id = c["citation_id"]
-                                global_idx = ev_start + local_idx
-                                local_to_global[old_id] = f"#{global_idx + 1}"
-
-                            global_answer = batch_answer
-                            for c in batch_citations:
-                                old_id = c["citation_id"]
-                                new_id = local_to_global[old_id]
-                                if new_id != old_id:
-                                    global_answer = re.sub(
-                                        re.escape(old_id) + r'(?=[^#\d]|$)',
-                                        new_id, global_answer,
-                                    )
-
-                            global_citations = []
-                            for c in batch_citations:
-                                gc = dict(c)
-                                gc["citation_id"] = local_to_global[c["citation_id"]]
-                                global_citations.append(gc)
-                            break
-
-                        if self.logger:
-                            self.logger.warning(
-                                f"  批次 {batch_idx + 1}/{n_batches} 引用一致性校验不通过"
-                                f"（第 {retry_attempt + 1}/{max_retries + 1} 次），"
-                                f"问题: {'; '.join(problems)}"
-                            )
-
-                        if retry_attempt >= max_retries:
-                            if self.logger:
-                                self.logger.warning(
-                                    f"  批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
-                                )
-                            break
-
-                        retry_prompt = list(prompt_messages)
-                        retry_prompt.append({"role": "assistant", "content": json.dumps(parsed)})
-                        retry_prompt.append({
-                            "role": "user",
-                            "content": (
-                                f"⚠️ 引用一致性检查发现以下问题：\n"
-                                + "\n".join(f"  - {p}" for p in problems)
-                                + "\n\n请确保 answer 中使用的每个 [#N] 编号都在 evidence 的 citation_id 中存在，"
-                                "且每个 evidence 条目都在 answer 中被引用。"
-                                "请修正后重新输出完整的 JSON。"
-                            ),
-                        })
-                        try:
-                            parsed, llm_meta = call_llm_json(
-                                self.client, self.llm_model, retry_prompt,
-                                f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}（引用修正 第{retry_attempt + 1}次）",
-                                logger=self.logger,
-                            )
-                            synthesis_llm_calls.append(llm_meta)
-                            batch_evidence = parsed.get("evidence", []) or []
-                            batch_answer = parsed.get("answer", "").strip()
-                            if not batch_answer:
-                                if self.logger:
-                                    self.logger.info(f"  批次 {batch_idx + 1}/{n_batches} 修正后仍无答案，跳过")
-                                break
-                            batch_citations, _ = self._build_citations_from_evidence(batch_evidence, batch)
-                        except Exception as exc:
-                            if self.logger:
-                                self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 修正失败: {exc}")
-                            break
-                    else:
-                        if self.logger:
-                            self.logger.warning(
-                                f"  批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
-                            )
-                        continue
-
-                    if problems:
-                        continue
-
-                    video_results.append({
-                        **meta,
-                        "answer": batch_answer,
-                        "citations": batch_citations,
-                        "answer_global": global_answer,
-                        "citations_global": global_citations,
-                        "useful_segment_count": len(batch),
-                        "batch_count": n_batches,
-                    })
-
-                    if self.logger:
-                        self.logger.info(
-                            f"  批次 {batch_idx + 1}/{n_batches} 完成，"
-                            f"evidence={len(batch_evidence)} 条"
-                        )
+                    group_raw_results[live_id] = future.result()
                 except Exception as exc:
                     if self.logger:
-                        self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 合成失败: {exc}")
+                        self.logger.error(f"视频组 {live_id} 处理异常: {exc}")
+                    group_raw_results[live_id] = None
+
+        # ── 串行后处理：全局引用编码 ──
+        # 按原始时间顺序遍历各组，分配全局连续的 evidence 序号和 citation 编号
+        all_evidence: list[dict[str, Any]] = []
+        global_evidence_offset = 0
+
+        for live_id, _ in video_group_items:
+            result = group_raw_results.get(live_id)
+            if result is None:
+                continue
+
+            meta = result["meta"]
+            for batch in result["batches"]:
+                local_answer = batch["answer"]
+                local_citations = batch["citations"]
+                local_evidence = batch.get("evidence", [])
+
+                if not local_citations:
+                    continue
+
+                # 构建局部→全局编号映射
+                local_to_global: dict[str, str] = {}
+                for local_idx, c in enumerate(local_citations):
+                    old_id = c["citation_id"]
+                    global_idx = global_evidence_offset + local_idx
+                    local_to_global[old_id] = f"#{global_idx + 1}"
+
+                # 更新 answer 中的引用编号
+                global_answer = local_answer
+                for c in local_citations:
+                    old_id = c["citation_id"]
+                    new_id = local_to_global[old_id]
+                    if new_id != old_id:
+                        global_answer = re.sub(
+                            re.escape(old_id) + r'(?=[^#\d]|$)',
+                            new_id, global_answer,
+                        )
+
+                # 更新 citations 中的编号
+                global_citations = []
+                for c in local_citations:
+                    gc = dict(c)
+                    gc["citation_id"] = local_to_global[c["citation_id"]]
+                    global_citations.append(gc)
+
+                all_evidence.extend(local_evidence)
+                global_evidence_offset += len(local_evidence)
+
+                video_results.append({
+                    **meta,
+                    "answer": local_answer,
+                    "citations": local_citations,
+                    "answer_global": global_answer,
+                    "citations_global": global_citations,
+                    "useful_segment_count": batch["useful_segment_count"],
+                    "batch_count": batch["batch_count"],
+                })
+
+            synthesis_llm_calls.extend(result["llm_calls"])
 
         # ---- 最终答案生成 ----
         answer_videos = [vr for vr in video_results if vr["answer"]]
@@ -474,6 +577,7 @@ class VideoKnowledgeQA:
                 if self.logger:
                     self.logger.debug("=== 最终答案合并 LLM 调用 - Prompt ===")
                     self.logger.debug(merge_prompt[0].get("content", ""))
+                # CHANGED: 必须串行——依赖所有视频分组合成结果，不能提前并发
                 parsed, merge_llm_meta = call_llm_json(
                     self.client, self.llm_model, merge_prompt, "最终答案合并", logger=self.logger
                 )
@@ -542,6 +646,7 @@ class VideoKnowledgeQA:
             self.logger.info(f"引用过滤: 保留 {len(citations)}/{citations_before} 个 citations，已重编号")
 
         try:
+            # CHANGED: 必须串行——依赖最终答案内容和 citations，不能提前并发
             risk_level, safety_reason = self._check_content_safety(question, answer_text, citations)
         except Exception as exc:
             if self.logger:

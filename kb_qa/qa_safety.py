@@ -105,8 +105,10 @@ def check_content_safety(
     ]
 
     try:
+        # CHANGED: 必须串行——依赖最终答案内容和 citations，不能提前并发
         parsed, _ = call_llm_json(
-            self.client, self.llm_model, safety_prompt, "内容安全审核", logger=self.logger
+            self.client, self.llm_model, safety_prompt, "内容安全审核",
+            max_tokens=300, logger=self.logger,
         )
         level = parsed.get("level", -1)
         reason = parsed.get("reason", "未提供理由")

@@ -17,9 +17,21 @@ def call_llm_json(
     messages: list[dict[str, str]],
     description: str,
     max_retries: int = 5,
+    max_tokens: Optional[int] = None,
     logger=None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """调用 LLM API 并解析 JSON 响应，包含重试机制（指数退避）。"""
+    """调用 LLM API 并解析 JSON 响应，包含重试机制（指数退避）。
+
+    Args:
+        client: OpenAI 客户端
+        llm_model: 模型名
+        messages: 对话消息列表
+        description: 调用描述（用于日志）
+        max_retries: 最大重试次数
+        max_tokens: 输出最大 token 数。None 表示不限制（合成类），
+                    简单查询改写可设 300~500 以节省成本。
+        logger: 日志器
+    """
     last_raw = None
 
     for attempt in range(max_retries):
@@ -31,7 +43,7 @@ def call_llm_json(
                 model=llm_model,
                 messages=messages,
                 temperature=0,
-                max_tokens=300,
+                max_tokens=max_tokens,
                 response_format={"type": "json_object"},
                 extra_body={"thinking": {"type": "disabled"}},
             )
@@ -41,7 +53,7 @@ def call_llm_json(
             llm_metadata = {
                 "model": llm_model,
                 "description": description,
-                "max_tokens": 300,
+                "max_tokens": max_tokens,
                 "thinking_disabled": True,
                 "input_tokens": getattr(resp.usage, "prompt_tokens", 0),
                 "output_tokens": getattr(resp.usage, "completion_tokens", 0),
