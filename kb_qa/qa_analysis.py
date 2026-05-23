@@ -49,6 +49,7 @@ def build_citations_from_evidence(
                     "quoted_text": normalize_text(s.text),
                     "video_offset": s.hhmmss,
                     "absolute_time": s.absolute_time,
+                    "video_datetime": s.video_datetime,
                     "source_file": s.file_path,
                     "video_path": s.video_path,
                     "video_title": s.video_title,
