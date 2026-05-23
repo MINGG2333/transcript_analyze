@@ -42,6 +42,27 @@ from .qa_utils import (
 from .qa_prompts import build_judge_prompt
 
 
+class PrefixedLogger:
+    """给日志消息添加统一前缀的轻量包装，适配 loguru / SimpleLogger 等任意 logger。
+
+    用法:
+        log = PrefixedLogger(logger, "[前缀]")
+        log.info("消息")  # 实际输出: [前缀] 消息
+    """
+    def __init__(self, logger, prefix: str):
+        self._logger = logger
+        self._prefix = prefix
+
+    def __getattr__(self, name):
+        # 将 info/warning/debug/error 等调用代理到原始 logger，并加上前缀
+        attr = getattr(self._logger, name, None)
+        if attr is None or not callable(attr):
+            raise AttributeError(f"logger 没有方法 {name}")
+        def wrapped(msg, *args, **kwargs):
+            attr(f"{self._prefix} {msg}", *args, **kwargs)
+        return wrapped
+
+
 class VideoKnowledgeQA:
     """直播视频知识库问答系统的主类。"""
 
@@ -133,10 +154,15 @@ class VideoKnowledgeQA:
         total = len(segs)
         n_batches = max(1, (total + per_video_batch_size - 1) // per_video_batch_size)
 
-        if self.logger:
-            self.logger.info(
-                f"[{video_idx}/{total_videos}] 处理直播 {live_id}（{meta.get('video_title', '')}），"
-                f"共 {total} 个片段，分 {n_batches} 批（每批最多 {per_video_batch_size} 条）"
+        # 创建带分组前缀的 logger，并发时一眼区分日志属于哪个视频
+        group_prefix = (
+            f"[{video_idx}/{total_videos} {meta.get('video_title', live_id[-8:])}]"
+        )
+        log = PrefixedLogger(self.logger, group_prefix) if self.logger else None
+
+        if log:
+            log.info(
+                f"处理直播 {live_id}，共 {total} 个片段，分 {n_batches} 批（每批最多 {per_video_batch_size} 条）"
             )
 
         batches_result: list[dict] = []
@@ -153,27 +179,28 @@ class VideoKnowledgeQA:
                 prompt_messages = build_group_synthesis_prompt(
                     question, batch, group_info=group_info, batch_label=batch_label, bg_text=bg_text,
                 )
-                if is_first_group and self.logger:
-                    self.logger.debug("=== 分组处理首个 LLM 调用 - Prompt ===")
-                    self.logger.debug(prompt_messages[0].get("content", ""))
+                if is_first_group and log:
+                    log.debug("=== 分组处理首个 LLM 调用 - Prompt ===")
+                    log.debug(prompt_messages[0].get("content", ""))
 
                 parsed, llm_meta = call_llm_json(
                     self.client, self.llm_model, prompt_messages,
                     f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}"
                     if n_batches > 1 else f"直播 {live_id} 合成",
-                    logger=self.logger,
+                    max_tokens=4096,
+                    logger=log,
                 )
 
-                if is_first_group and self.logger:
-                    self.logger.debug("=== 分组处理首个 LLM 调用 - Response ===")
-                    self.logger.debug(json.dumps(parsed, ensure_ascii=False))
+                if is_first_group and log:
+                    log.debug("=== 分组处理首个 LLM 调用 - Response ===")
+                    log.debug(json.dumps(parsed, ensure_ascii=False))
                 batch_evidence = parsed.get("evidence", []) or []
                 batch_answer = parsed.get("answer", "").strip()
                 all_llm_calls.append(llm_meta)
 
                 if not batch_answer:
-                    if self.logger:
-                        self.logger.info(f"  批次 {batch_idx + 1}/{n_batches} 无答案，跳过")
+                    if log:
+                        log.info(f"批次 {batch_idx + 1}/{n_batches} 无答案，跳过")
                     continue
 
                 batch_citations, _ = self._build_citations_from_evidence(batch_evidence, batch)
@@ -188,9 +215,9 @@ class VideoKnowledgeQA:
                     if not final_citations:
                         final_answer = re.sub(r"\[\#\d+\]", "", batch_answer)
                         final_citations = []
-                        if self.logger:
-                            self.logger.info(
-                                f"  批次 {batch_idx + 1}/{n_batches} evidence 为空，已清除引用标记"
+                        if log:
+                            log.info(
+                                f"批次 {batch_idx + 1}/{n_batches} evidence 为空，已清除引用标记"
                             )
                         break
 
@@ -198,17 +225,17 @@ class VideoKnowledgeQA:
                     if not problems:
                         break
 
-                    if self.logger:
-                        self.logger.warning(
-                            f"  批次 {batch_idx + 1}/{n_batches} 引用一致性校验不通过"
+                    if log:
+                        log.warning(
+                            f"批次 {batch_idx + 1}/{n_batches} 引用一致性校验不通过"
                             f"（第 {retry_attempt + 1}/{max_retries + 1} 次），"
                             f"问题: {'; '.join(problems)}"
                         )
 
                     if retry_attempt >= max_retries:
-                        if self.logger:
-                            self.logger.warning(
-                                f"  批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
+                        if log:
+                            log.warning(
+                                f"批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
                             )
                         break
 
@@ -228,30 +255,34 @@ class VideoKnowledgeQA:
                         parsed, llm_meta = call_llm_json(
                             self.client, self.llm_model, retry_prompt,
                             f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}（引用修正 第{retry_attempt + 1}次）",
-                            logger=self.logger,
+                            logger=log,
                         )
                         all_llm_calls.append(llm_meta)
                         batch_evidence = parsed.get("evidence", []) or []
                         batch_answer = parsed.get("answer", "").strip()
                         if not batch_answer:
-                            if self.logger:
-                                self.logger.info(f"  批次 {batch_idx + 1}/{n_batches} 修正后仍无答案，跳过")
+                            if log:
+                                log.info(f"批次 {batch_idx + 1}/{n_batches} 修正后仍无答案，跳过")
                             break
                         final_citations, _ = self._build_citations_from_evidence(batch_evidence, batch)
                         final_answer = batch_answer
                         final_evidence = batch_evidence
                     except Exception as exc:
-                        if self.logger:
-                            self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 修正失败: {exc}")
+                        if log:
+                            log.warning(f"批次 {batch_idx + 1}/{n_batches} 修正失败: {exc}")
                         break
                 else:
-                    if self.logger:
-                        self.logger.warning(
-                            f"  批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
+                    if log:
+                        log.warning(
+                            f"批次 {batch_idx + 1}/{n_batches} 重试 {max_retries} 次后仍不通过，跳过"
                         )
                     continue
 
                 if problems:
+                    if log:
+                        log.warning(
+                            f"批次 {batch_idx + 1}/{n_batches} 引用一致性校验不通过，跳过"
+                        )
                     continue
 
                 batches_result.append({
@@ -262,14 +293,14 @@ class VideoKnowledgeQA:
                     "batch_count": n_batches,
                 })
 
-                if self.logger:
-                    self.logger.info(
-                        f"  批次 {batch_idx + 1}/{n_batches} 完成，"
+                if log:
+                    log.info(
+                        f"批次 {batch_idx + 1}/{n_batches} 完成，"
                         f"evidence={len(final_evidence)} 条"
                     )
             except Exception as exc:
-                if self.logger:
-                    self.logger.warning(f"  批次 {batch_idx + 1}/{n_batches} 合成失败: {exc}")
+                if log:
+                    log.warning(f"批次 {batch_idx + 1}/{n_batches} 合成失败: {exc}")
 
         return {
             "meta": meta,
