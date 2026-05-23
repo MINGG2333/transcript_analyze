@@ -187,7 +187,6 @@ class VideoKnowledgeQA:
                     self.client, self.llm_model, prompt_messages,
                     f"直播 {live_id} 合成 {batch_idx + 1}/{n_batches}"
                     if n_batches > 1 else f"直播 {live_id} 合成",
-                    max_tokens=4096,
                     logger=log,
                 )
 

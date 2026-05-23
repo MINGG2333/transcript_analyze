@@ -74,7 +74,8 @@ def generate_kb_description(self) -> str:
         {
             "role": "user",
             "content": (
-                "请根据下面的信息，用一句简洁的话（20~50字）描述这个数据库的内容。\n\n"
+                "请根据下面的信息，用一句简洁的话（20~50字）描述这个数据库的内容。\n"
+                "思考不超过150字，确保思考+输出总量在限制内。\n\n"
                 f"{stats_text}\n\n"
                 f"数据条目示例：\n"
                 f"{sample_text}\n\n"
@@ -237,6 +238,30 @@ def retrieve(
             f"survey_top_k={vector_survey_top_k}, score_threshold={vector_score_threshold}"
         )
     survey_vector_ids, survey_vector_scores = self.vector.retrieve(vector_query, top_k=vector_survey_top_k)
+
+    # 主播讲话片段加权（系数 1.25），让主播原话优先进入候选
+    vector_original: dict[str, float] = {}
+    vector_boosted = []
+    for sid, score in zip(survey_vector_ids, survey_vector_scores):
+        seg = self.store.segments.get(sid)
+        if seg and seg.source_label == "主播讲话":
+            vector_original[sid] = score
+            score *= 1.1
+        vector_boosted.append((sid, score))
+    if self.logger:
+        for sid, orig in list(vector_original.items())[:13]:
+            self.logger.debug(f"  主播加权: {sid} {orig:.4f} → {orig*1.1:.4f}")
+    survey_vector_ids = [sid for sid, _ in vector_boosted]
+    survey_vector_scores = [score for _, score in vector_boosted]
+
+    # 按加权后的分数重新排序，确保主播加权片段能进入前20
+    sorted_pairs = sorted(
+        zip(survey_vector_ids, survey_vector_scores),
+        key=lambda x: x[1], reverse=True,
+    )
+    survey_vector_ids = [sid for sid, _ in sorted_pairs]
+    survey_vector_scores = [score for _, score in sorted_pairs]
+
     survey_vector_filtered = [
         (sid, score) for sid, score in zip(survey_vector_ids, survey_vector_scores)
         if score >= vector_score_threshold
@@ -267,9 +292,15 @@ def retrieve(
             "text_snippet": text_snippet[:120],
         })
         if rank <= 200 and self.logger:
-            self.logger.debug(
-                f"  {rank:03d}. {sid} score={score:.6f} text={text_snippet}"
-            )
+            orig = vector_original.get(sid)
+            if orig:
+                self.logger.debug(
+                    f"  {rank:03d}. {sid} score={score:.6f} (原{orig:.4f}) text={text_snippet}"
+                )
+            else:
+                self.logger.debug(
+                    f"  {rank:03d}. {sid} score={score:.6f} text={text_snippet}"
+                )
     if self.logger:
         self.logger.info(f"[2/6] 向量检索完成，得到 {len(vector_ids)} 个候选段，过滤后 {len(vector_filtered)} 个")
 
@@ -287,6 +318,30 @@ def retrieve(
             f"survey_top_k={bm25_survey_top_k}, score_threshold={bm25_score_threshold}"
         )
     survey_bm25_ids, survey_bm25_scores = get_bm25(self).retrieve(bm25_query, top_k=bm25_survey_top_k)
+
+    # 主播讲话片段加权（系数 1.3），让主播原话优先进入候选
+    bm25_original: dict[str, float] = {}
+    bm25_boosted = []
+    for sid, score in zip(survey_bm25_ids, survey_bm25_scores):
+        seg = self.store.segments.get(sid)
+        if seg and seg.source_label == "主播讲话":
+            bm25_original[sid] = score
+            score *= 1.2
+        bm25_boosted.append((sid, score))
+    if self.logger:
+        for sid, orig in list(bm25_original.items())[:13]:
+            self.logger.debug(f"  主播加权: {sid} {orig:.4f} → {orig*1.2:.4f}")
+    survey_bm25_ids = [sid for sid, _ in bm25_boosted]
+    survey_bm25_scores = [score for _, score in bm25_boosted]
+
+    # 按加权后的分数重新排序，确保主播加权片段能进入前20
+    sorted_pairs = sorted(
+        zip(survey_bm25_ids, survey_bm25_scores),
+        key=lambda x: x[1], reverse=True,
+    )
+    survey_bm25_ids = [sid for sid, _ in sorted_pairs]
+    survey_bm25_scores = [score for _, score in sorted_pairs]
+
     survey_bm25_filtered = [
         (sid, score) for sid, score in zip(survey_bm25_ids, survey_bm25_scores)
         if score >= bm25_score_threshold
@@ -317,9 +372,15 @@ def retrieve(
             "text_snippet": text_snippet[:120],
         })
         if rank <= 200 and self.logger:
-            self.logger.debug(
-                f"  {rank:03d}. {sid} score={score:.6f} text={text_snippet[:120]}"
-            )
+            orig = bm25_original.get(sid)
+            if orig:
+                self.logger.debug(
+                    f"  {rank:03d}. {sid} score={score:.6f} (原{orig:.4f}) text={text_snippet[:120]}"
+                )
+            else:
+                self.logger.debug(
+                    f"  {rank:03d}. {sid} score={score:.6f} text={text_snippet[:120]}"
+                )
     if self.logger:
         self.logger.info(f"[4/6] BM25检索完成，得到 {len(bm25_ids)} 个候选段，过滤后 {len(bm25_filtered)} 个")
 
@@ -474,8 +535,9 @@ def refine_vector_query(self, question: str) -> tuple[str, dict[str, Any]]:
     try:
         parsed, llm_metadata = call_llm_json(
             self.client, self.llm_model, prompt_messages, "向量查询改写",
-            max_tokens=50, logger=self.logger,
+            max_tokens=300, logger=self.logger,
         )
+
         refined = (parsed.get("refined_query") or "").strip()
         if not refined:
             raise ValueError("LLM未返回 refined_query")
@@ -507,15 +569,33 @@ def refine_bm25_query(self, question: str) -> tuple[str, dict[str, Any]]:
     try:
         parsed, llm_metadata = call_llm_json(
             self.client, self.llm_model, prompt_messages, "BM25 查询改写",
-            max_tokens=50, logger=self.logger,
+            max_tokens=400, logger=self.logger,
         )
+
         refined = (parsed.get("refined_query") or "").strip()
         if not refined:
             raise ValueError("LLM未返回 refined_query")
         return refined, llm_metadata
     except Exception as exc:
         if self.logger:
-            self.logger.warning(f"BM25查询改写失败，使用原始问题: {exc}")
+            self.logger.warning(f"BM25查询改写失败，重试1次并要求精简思考: {exc}")
+        try:
+            retry_messages = list(prompt_messages)
+            retry_messages.append({
+                "role": "user",
+                "content": "思考太长了！重新输出，这次思考必须极简短，直接给出关键词。",
+            })
+            parsed, llm_metadata = call_llm_json(
+                self.client, self.llm_model, retry_messages, "BM25 查询改写(重试)",
+                max_tokens=600, logger=self.logger,
+            )
+            refined = (parsed.get("refined_query") or "").strip()
+            if refined:
+                return refined, llm_metadata
+        except Exception:
+            pass
+        if self.logger:
+            self.logger.warning(f"BM25查询改写重试仍失败，使用原始问题")
         return question, {
             "description": "BM25 查询改写",
             "success": False,

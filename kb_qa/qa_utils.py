@@ -22,6 +22,7 @@ def call_llm_json(
     max_retries: int = 5,
     max_tokens: Optional[int] = None,
     logger=None,
+    thinking_disabled: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """调用 LLM API 并解析 JSON 响应，包含重试机制（指数退避）。
 
@@ -31,9 +32,9 @@ def call_llm_json(
         messages: 对话消息列表
         description: 调用描述（用于日志）
         max_retries: 最大重试次数
-        max_tokens: 输出最大 token 数。None 表示不限制（合成类），
-                    简单查询改写可设 300~500 以节省成本。
+        max_tokens: 输出最大 token 数，None 表示不限制
         logger: 日志器
+        thinking_disabled: 是否禁用思考模式。默认 False（启用思考模式）。
     """
     last_raw = None
 
@@ -42,13 +43,17 @@ def call_llm_json(
             if logger:
                 logger.info(f"调用LLM: {description} (尝试 {attempt+1}/{max_retries})")
 
+            extra: dict[str, Any] = {}
+            if thinking_disabled:
+                extra["thinking"] = {"type": "disabled"}
+
             resp = client.chat.completions.create(
                 model=llm_model,
                 messages=messages,
                 temperature=0,
                 max_tokens=max_tokens,
                 response_format={"type": "json_object"},
-                extra_body={"thinking": {"type": "disabled"}},
+                extra_body=extra,
             )
             content = resp.choices[0].message.content or "{}"
             last_raw = content
@@ -57,7 +62,7 @@ def call_llm_json(
                 "model": llm_model,
                 "description": description,
                 "max_tokens": max_tokens,
-                "thinking_disabled": True,
+                "thinking_disabled": thinking_disabled,
                 "input_tokens": getattr(resp.usage, "prompt_tokens", 0),
                 "output_tokens": getattr(resp.usage, "completion_tokens", 0),
                 "total_tokens": getattr(resp.usage, "total_tokens", 0),
@@ -89,16 +94,15 @@ def call_llm_json(
                         return parsed, llm_metadata
                     except json.JSONDecodeError:
                         pass
-                if attempt < max_retries - 1:
-                    wait_time = 5 ** attempt
+                # JSON解析失败通常意味着输出截断，重试相同prompt大概率同样结果
+                # 只重试1次（防瞬时故障），失败后立即报错，不走指数退避
+                if attempt == 0:
                     if logger:
-                        logger.warning(f"JSON解析失败 (第 {attempt+1} 次)，等待 {wait_time} 秒后重试...")
-                    time.sleep(wait_time)
+                        logger.warning(f"JSON解析失败，重试1次...")
                     continue
-                else:
-                    llm_metadata["success"] = False
-                    llm_metadata["error"] = f"无法将LLM响应解析为JSON: {content}"
-                    raise RuntimeError(llm_metadata["error"])
+                llm_metadata["success"] = False
+                llm_metadata["error"] = f"无法将LLM响应解析为JSON: {content[:500]}"
+                raise RuntimeError(llm_metadata["error"])
 
         except Exception as e:
             # CHANGED: 分类处理 DeepSeek API 错误码（参考 §六）
