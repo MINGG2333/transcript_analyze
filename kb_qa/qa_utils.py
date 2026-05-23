@@ -31,7 +31,9 @@ def call_llm_json(
                 model=llm_model,
                 messages=messages,
                 temperature=0,
+                max_tokens=300,
                 response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": "disabled"}},
             )
             content = resp.choices[0].message.content or "{}"
             last_raw = content
@@ -39,6 +41,8 @@ def call_llm_json(
             llm_metadata = {
                 "model": llm_model,
                 "description": description,
+                "max_tokens": 300,
+                "thinking_disabled": True,
                 "input_tokens": getattr(resp.usage, "prompt_tokens", 0),
                 "output_tokens": getattr(resp.usage, "completion_tokens", 0),
                 "total_tokens": getattr(resp.usage, "total_tokens", 0),
