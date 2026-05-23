@@ -429,10 +429,11 @@ def retrieve(
             merged_ids.append(sid)
             added.add(sid)
 
-    # 第二步：补充 BM25 片段，但严格控制数量。
+    # 第二步：补充 BM25 片段，让 BM25-only 结果补充到总量上限。
+    # 注意：必须用 max(0, ...) 防止 len(merged_ids) 已超过 max_base_segments 时变负数。
     bm25_supplement_limit = (
         80 if len(merged_ids) == 0          # 向量未找到：多补充一些 BM25
-        else min(30, (max_base_segments or 200) - len(merged_ids))  # 向量已找到：最多补充 30 条
+        else max(0, (max_base_segments or 500) - len(merged_ids))  # 向量已找到：补充到 max_base_segments
     )
     bm25_supplement_count = 0
     for sid in all_sorted:

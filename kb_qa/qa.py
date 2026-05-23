@@ -312,7 +312,7 @@ class VideoKnowledgeQA:
         question: str,
         vector_top_k: int = 1000,
         bm25_top_k: int = 1000,
-        context_window: int = 3,
+        context_window: int = 10,
         vector_score_threshold: float = 0.3,
         bm25_score_threshold: float = 15.0,
         analysis_batch_size: int = 20,
@@ -332,7 +332,7 @@ class VideoKnowledgeQA:
             context_window,
             vector_score_threshold=vector_score_threshold,
             bm25_score_threshold=bm25_score_threshold,
-            max_base_segments=200,
+            max_base_segments=500,
             max_expanded_segments=None,
         )
         if self.logger:
