@@ -1,4 +1,4 @@
-chromadb
+chromadb==0.5.0
 sentence-transformers
 openai>=2
 rank-bm25
