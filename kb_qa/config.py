@@ -26,11 +26,11 @@ class KBQADefaults:
     # 向量检索实际使用的 top_k
     # 从 survey 结果中取前 N 条用于后续分析
     # 值越大：检索越全面，但分析/合成的 LLM API 消耗越多
-    vector_top_k: int = 200
+    vector_top_k: int = 40
 
     # BM25 检索实际使用的 top_k
     # 从 survey 结果中取前 N 条用于后续分析（仅作为向量的少量补充）
-    bm25_top_k: int = 200
+    bm25_top_k: int = 50
 
     # 向量检索相关性阈值 [0-1]
     # 低于此分数的向量检索结果被过滤，不参与后续合并
@@ -60,7 +60,7 @@ class KBQADefaults:
 
     # 合并后的基础段前后各扩展多少条同直播同类型片段作为上下文
     # 值越大：每个片段的背景信息越多，但候选总量膨胀
-    context_window: int = 10
+    context_window: int = 5
 
     # ════════════════════════════════════════════════════
     # 分析阶段参数
