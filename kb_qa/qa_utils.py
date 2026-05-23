@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 import uuid
+
+import openai  # CHANGED: 用于异常类型判断
 
 
 def call_llm_json(
@@ -98,17 +101,62 @@ def call_llm_json(
                     raise RuntimeError(llm_metadata["error"])
 
         except Exception as e:
-            if logger:
-                logger.warning(f"LLM请求异常 (第 {attempt+1} 次): {e}")
+            # CHANGED: 分类处理 DeepSeek API 错误码（参考 §六）
+            should_retry = True
+            wait_time = 5 ** attempt  # 默认退避
 
-            if attempt < max_retries - 1:
-                wait_time = 5 ** attempt
+            if isinstance(e, openai.RateLimitError):
+                # 429 速率限制：指数退避 + 随机抖动
+                should_retry = True
+                wait_time = (2 ** attempt) + random.uniform(0, 1)
+                retry_after = None
+                if e.response is not None:
+                    retry_after = e.response.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        wait_time = float(retry_after)
+                    except (ValueError, TypeError):
+                        pass
                 if logger:
-                    logger.warning(f"等待 {wait_time} 秒后重试...")
+                    logger.warning(
+                        f"429 速率限制 (第 {attempt+1} 次)，等待 {wait_time:.1f} 秒后重试..."
+                    )
+            elif isinstance(e, openai.APIStatusError):
+                if e.status_code in (500, 503):
+                    # 500/503 服务器故障/繁忙：指数退避可重试
+                    wait_time = 2 ** attempt
+                    if logger:
+                        logger.warning(
+                            f"{e.status_code} 服务器错误 (第 {attempt+1} 次)，等待 {wait_time} 秒后重试..."
+                        )
+                else:
+                    # 400/401/402/422 不可重试，直接报错
+                    should_retry = False
+                    if logger:
+                        logger.error(f"不可重试的 API 错误 {e.status_code}: {e}")
+            elif isinstance(e, (openai.APITimeoutError, openai.APIConnectionError)):
+                # 连接超时/异常：指数退避可重试
+                wait_time = 2 ** attempt
+                if logger:
+                    logger.warning(
+                        f"连接异常 (第 {attempt+1} 次): {e}，等待 {wait_time} 秒后重试..."
+                    )
+            else:
+                # 其他异常，保持原有重试逻辑
+                if logger:
+                    logger.warning(f"LLM请求异常 (第 {attempt+1} 次): {e}")
+
+            if should_retry and attempt < max_retries - 1:
+                if logger:
+                    logger.warning(f"等待 {wait_time:.1f} 秒后重试...")
                 time.sleep(wait_time)
                 continue
             else:
-                error_msg = f"LLM调用在 {max_retries} 次重试后仍失败"
+                error_msg = (
+                    f"LLM调用在 {max_retries} 次重试后仍失败"
+                    if should_retry
+                    else f"不可重试的 API 错误: {e}"
+                )
                 if logger:
                     logger.error(error_msg)
                 raise RuntimeError(error_msg) from e
@@ -285,7 +333,23 @@ def ensure_client(client, api_key: Optional[str], api_base: Optional[str], logge
             "缺少 openai 依赖，请先执行: python -m pip install -r requirements_kb_qa.txt"
         ) from exc
 
-    if api_key:
-        return OpenAI(api_key=api_key, base_url=api_base) if api_base else OpenAI(api_key=api_key)
+    try:
+        import httpx
+    except Exception:
+        httpx = None  # CHANGED: httpx 不可用时跳过超时配置
+
+    if httpx is not None:
+        # CHANGED: 设置超时——匹配 DeepSeek 10 分钟连接关闭策略（参考 §五）
+        # 总超时 600s，连接超时 30s，读写超时 590s
+        http_client = httpx.Client(timeout=httpx.Timeout(600.0, connect=30.0))
+        kwargs = {"http_client": http_client}
     else:
-        return OpenAI(base_url=api_base) if api_base else OpenAI()
+        kwargs = {}
+
+    if api_key:
+        kwargs["api_key"] = api_key
+        if api_base:
+            kwargs["base_url"] = api_base
+    elif api_base:
+        kwargs["base_url"] = api_base
+    return OpenAI(**kwargs)

@@ -639,6 +639,24 @@ class VideoKnowledgeQA:
             "calls": synthesis_llm_calls,
         }
 
+        # CHANGED: Token 用量汇总日志（参考 §十·方法一）
+        if self.logger and synthesis_llm_calls:
+            total_prompt = sum(
+                c.get("input_tokens", 0) or 0 for c in synthesis_llm_calls
+            )
+            total_completion = sum(
+                c.get("output_tokens", 0) or 0 for c in synthesis_llm_calls
+            )
+            total_tokens = total_prompt + total_completion
+            self.logger.info(
+                "━━━ Token 用量汇总 ━━━\n"
+                f"  LLM 调用次数: {len(synthesis_llm_calls)}\n"
+                f"  输入 tokens : {total_prompt:,}\n"
+                f"  输出 tokens : {total_completion:,}\n"
+                f"  总 tokens   : {total_tokens:,}\n"
+                "━━━━━━━━━━━━━━━━━"
+            )
+
         citations_before = len(citations)
         citations = filter_citations_by_answer(answer_text, citations)
         answer_text, citations = renumber_citations(answer_text, citations)
