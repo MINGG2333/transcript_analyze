@@ -89,6 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--llm-model", default="deepseek-v4-flash", help="问答LLM模型名")
     p.add_argument("--api-base", default=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"), help="LLM API base url")
     p.add_argument("--api-key", default=os.getenv("DEEPSEEK_API_KEY"), help="LLM API key")
+    default_bg_dir = str(_SCRIPT_DIR / "docs" / "Background")
+    p.add_argument("--background-knowledge-dir", default=default_bg_dir,
+                    help="背景知识 markdown 文件目录（默认: docs/Background）")
     p.add_argument("--debug", action="store_true", help="开启调试日志，打印更多内部信息")
 
     sub = p.add_subparsers(dest="command", required=True)
@@ -159,6 +162,11 @@ def main() -> None:
         )
         sys.exit(1)
 
+    # ── 背景知识目录 ──
+    bg_dir: Optional[Path] = None
+    if args.background_knowledge_dir:
+        bg_dir = Path(args.background_knowledge_dir)
+
     qa = VideoKnowledgeQA(
         records_path=Path(args.records),
         subtitle_root=Path(args.subtitle_root),
@@ -168,6 +176,7 @@ def main() -> None:
         api_base=args.api_base,
         api_key=final_api_key,
         logger=logger,
+        background_knowledge_dir=bg_dir,
     )
 
     if args.command == "build":

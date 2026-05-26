@@ -526,7 +526,10 @@ def refine_vector_query(self, question: str) -> tuple[str, dict[str, Any]]:
     """向量查询改写。"""
     if self.logger:
         self.logger.debug(f"向量查询改写input: {question}")
-    prompt_messages = build_vector_refinement_prompt(question, self.kb_description or "未知数据库")
+
+    prompt_messages = build_vector_refinement_prompt(
+        question, self.kb_description or "未知数据库",
+    )
 
     if self.logger:
         self.logger.debug("=== 向量查询改写完整 Prompt ===")
@@ -560,7 +563,10 @@ def refine_bm25_query(self, question: str) -> tuple[str, dict[str, Any]]:
     """BM25 查询改写。"""
     if self.logger:
         self.logger.debug(f"BM25查询改写input: {question}")
-    prompt_messages = build_bm25_refinement_prompt(question, self.kb_description or "未知数据库")
+
+    prompt_messages = build_bm25_refinement_prompt(
+        question, self.kb_description or "未知数据库",
+    )
 
     if self.logger:
         self.logger.debug("=== BM25 查询改写完整 Prompt ===")

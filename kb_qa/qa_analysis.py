@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 from .models import Segment
 from .name_normalizer import normalize_text
 
 
 def build_kb_background_text(self) -> str:
-    """构建知识库背景说明，供分析/合成提示使用。"""
-    if self.kb_description:
-        return f"【数据库背景】{self.kb_description}"
-    return ""
+    """构建知识库背景说明，供分组合成提示使用。
+
+    背景知识（成员档案、平台术语等）仅在最终合并步骤注入，
+    避免每次分组合成 LLM 调用都增加 ~10000 chars 的 token 消耗。
+    """
+    db_bg = f"【数据库背景】{self.kb_description}" if self.kb_description else ""
+    parts = [db_bg] if db_bg else []
+    return "\n\n".join(parts) if parts else ""
 
 
 def build_citations_from_evidence(
@@ -63,15 +67,18 @@ def build_citations_from_evidence(
 
 
 def build_merge_prompt(
-    question: str, video_summaries_text: str
+    question: str, video_summaries_text: str,
+    bg_knowledge_text: str = "",
 ) -> list[dict[str, str]]:
     """构建多视频分组答案合并的 prompt。"""
+    bg_section = f"\n\n{bg_knowledge_text}" if bg_knowledge_text else ""
     return [
         {
             "role": "user",
             "content": (
                 "你是一名熟知这名主播的粉丝，现在需要将多个视频分组对同一个问题的分析结果"
-                "合并成一个连贯、完整的答案。\n\n"
+                "合并成一个连贯、完整的答案。"
+                f"{bg_section}\n\n"
                 "每个视频分组的分析结果包含该组的初步答案和引用的片段（引用编号已经是全局统一的最终编号）。\n"
                 "不要在答案中包含组号和分组的标记，而是自然地整合信息。\n"
                 "引用编号 [#N] 已在输入中使用最终编号，输出时继续使用这些编号即可。\n\n"
@@ -85,8 +92,9 @@ def build_merge_prompt(
                 "2) 引用编号已在输入中给出，直接沿用即可（无需创建新的引用）；\n"
                 "3) 如果某些视频分组的答案只是重复背景常识（如\"SNH48是女子团体\"），"
                 "可以合并成一句，不要每个分组都单独说一遍；\n"
-                "4) 引用精简：仅当不同引用的论证角度高度相似时才去重保留最具代表性的几个即可；"
-                "但如果某个引用提供了独特的信息角度或表达方式，即使都为同一结论服务，也应当保留——独特的表达本身就是亮点。\n"
+                "4) ⚠️ 引用精简（关键）：合并答案时，必须严格执行以下规则：\n"
+                "   - 当不同引用的论证角度高度相似时去重保留最具代表性的几个即可；\n"
+                "   - 但如果某个引用提供了独特的信息角度或表达方式，即使都为同一结论服务，也应当保留——独特的表达本身就是亮点。\n"
                 "5) 以自然、亲切的口吻回答，就像在跟朋友介绍一样。\n"
                 "6) 回答应客观、负责任，避免对主播造成不当误导或负面形象。\n"
                 "7) ⚠️ 重要——请仔细阅读每条引用片段的「⚠️ 分析」字段，其中包含了该片段与问题关系的判断以及上下文说明"

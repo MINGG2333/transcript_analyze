@@ -30,6 +30,7 @@ from .qa_analysis import (
     build_merge_prompt,
 )
 from .qa_safety import check_content_safety
+from .background_knowledge import BackgroundKnowledge
 from .qa_utils import (
     call_llm_json,
     validate_answer_citations,
@@ -84,6 +85,7 @@ class VideoKnowledgeQA:
         api_base: Optional[str] = None,
         api_key: Optional[str] = None,
         logger=None,
+        background_knowledge_dir: Optional[Path] = None,
     ):
         self.records_path = records_path
         self.subtitle_root = subtitle_root
@@ -102,6 +104,22 @@ class VideoKnowledgeQA:
         self.kb_description_path = kb_dir / "kb_description.txt"
         self.kb_description: Optional[str] = None
         self._load_kb_description()
+
+        # ── 加载外部背景知识（成员档案、平台术语等） ──
+        self.bg_knowledge = BackgroundKnowledge()
+        if background_knowledge_dir is not None:
+            bg_dir = Path(background_knowledge_dir)
+            if bg_dir.exists() and bg_dir.is_dir():
+                loaded = self.bg_knowledge.load_from_dir(bg_dir)
+                if self.logger:
+                    self.logger.info(
+                        f"已加载背景知识: {loaded} 字符, "
+                        f"来自 {bg_dir}"
+                    )
+            elif self.logger:
+                self.logger.warning(
+                    f"背景知识目录不存在: {bg_dir}"
+                )
 
     def _build_judge_prompt(self, question: str, segments: list) -> str:
         """旧版 judge prompt 构建（保留兼容）。"""
@@ -602,7 +620,10 @@ class VideoKnowledgeQA:
                 )
             summaries_text = "\n\n".join(video_summaries)
 
-            merge_prompt = build_merge_prompt(question, summaries_text)
+            bg_text_for_merge = ""
+            if hasattr(self, "bg_knowledge") and self.bg_knowledge and self.bg_knowledge.is_loaded:
+                bg_text_for_merge = self.bg_knowledge.to_prompt_block()
+            merge_prompt = build_merge_prompt(question, summaries_text, bg_knowledge_text=bg_text_for_merge)
             try:
                 if self.logger:
                     self.logger.debug("=== 最终答案合并 LLM 调用 - Prompt ===")
