@@ -29,7 +29,7 @@ from .qa_analysis import (
     build_citations_from_evidence,
     build_merge_prompt,
 )
-from .qa_safety import check_content_safety
+from .qa_safety import check_content_safety, sanitize_content
 from .background_knowledge import BackgroundKnowledge
 from .qa_utils import (
     call_llm_json,
@@ -74,6 +74,7 @@ class VideoKnowledgeQA:
     _build_kb_background_text = build_kb_background_text
     _build_citations_from_evidence = build_citations_from_evidence
     _check_content_safety = check_content_safety
+    _sanitize_content = sanitize_content
 
     def __init__(
         self,
@@ -339,6 +340,96 @@ class VideoKnowledgeQA:
         synthesis_batch_size: int = 50,
     ) -> dict[str, Any]:
         self._ensure_client()
+
+        # CHANGED: 主题相关性判断——先判断问题是否与陈嘉仪相关
+        relevance_messages = [
+            {
+                "role": "user",
+                "content": (
+                    "判断以下用户问题是否与SNH48成员陈嘉仪相关。\n\n"
+                    "相关范围：她的个人资料（生日/身高/爱好/宠物等）、演出/公演/直播、音乐作品、"
+                    "粉丝文化、SNH48团体相关、口袋48平台相关。\n\n"
+                    "不相关示例：政治、经济、其他不相关的明星、日常闲聊不涉及陈嘉仪、数学题、代码问题等。\n\n"
+                    f"用户问题：{question}\n\n"
+                    '请输出JSON：{"relevant": "yes"} 或 {"relevant": "no"}'
+                ),
+            }
+        ]
+        try:
+            relevance_result, _ = call_llm_json(
+                self.client, self.llm_model, relevance_messages, "主题相关性判断",
+                max_tokens=30, logger=self.logger, thinking_disabled=True,
+            )
+            is_relevant = relevance_result.get("relevant", "no") == "yes"
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"主题相关性判断异常: {exc}")
+            is_relevant = True  # 异常时默认放行
+
+        if not is_relevant:
+            if self.logger:
+                self.logger.info(f"❌ 问题与陈嘉仪不相关，已婉拒: {question!r}")
+            result = {
+                "question": question,
+                "answer": "抱歉，我只了解与陈嘉仪相关的信息，请提出与陈嘉仪有关的问题。",
+                "citations": [],
+                "retrieved_count": 0,
+                "retrieval": {
+                    "vector_hits_raw": 0,
+                    "vector_hits_filtered": 0,
+                    "bm25_hits_raw": 0,
+                    "bm25_hits_filtered": 0,
+                    "raw_merged_ids": 0,
+                    "used_base_ids": 0,
+                    "candidate_count": 0,
+                    "truncated": False,
+                    "merged_ids_set": [],
+                    "merged_dict_scores": {},
+                },
+                "analysis_summary": {
+                    "total_candidates": 0,
+                    "useful_segment_count": 0,
+                    "analysis_batches": [],
+                    "analysis_batch_size": analysis_batch_size,
+                },
+                "useful_segment_count": 0,
+                "video_results": [],
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "content_safety_flagged": False,
+                "risk_level": 0,
+                "risk_label": "SAFE",
+                "safety_reason": "主题不相关，未进入审核流程",
+            }
+            archive_data = {
+                "question": question,
+                "created_at": result["created_at"],
+                "retrieval": result["retrieval"],
+                "retrieval_segments": [],
+                "analysis_summary": result["analysis_summary"],
+                "analysis": [],
+                "useful_segments": [],
+                "video_results": [],
+                "llm_calls": {
+                    "analysis_batches": [],
+                    "synthesis": {"description": "skip_topic_not_relevant"},
+                },
+                "content_safety": {
+                    "flagged": False,
+                    "risk_level": 0,
+                    "risk_label": "SAFE",
+                    "reason": "主题不相关，未进入审核流程",
+                    "original_answer": result["answer"],
+                    "original_citations": [],
+                },
+                "answer": result["answer"],
+                "citations": [],
+                "retrieved_count": 0,
+                "useful_segment_count": 0,
+            }
+            archive_path = self._archive(archive_data)
+            result["archive_path"] = str(archive_path)
+            return result
+
         if self.logger:
             self.logger.info(
                 f"开始检索: vector_top_k={vector_top_k}, bm25_top_k={bm25_top_k}, context_window={context_window}"
@@ -690,7 +781,69 @@ class VideoKnowledgeQA:
             "calls": synthesis_llm_calls,
         }
 
-        # CHANGED: Token 用量汇总日志（参考 §十·方法一）
+        try:
+            # CHANGED: 安全审核提前到引用重编号之前，便于将token计入汇总
+            risk_level, safety_reason, safety_llm_meta = self._check_content_safety(
+                question, answer_text, citations
+            )
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"内容安全审核异常: {exc}")
+            risk_level = RiskLevel.MEDIUM
+            safety_reason = f"审核异常: {exc}"
+            safety_llm_meta = None
+
+        # CHANGED: 将安全审核的 LLM 调用计入 token 汇总
+        if safety_llm_meta:
+            synthesis_llm_calls.append(safety_llm_meta)
+
+        # CHANGED: 审核不通过时尝试净化（仅尝试一次）
+        sanitize_attempted = False
+        if risk_level >= RiskLevel.LOW:
+            if self.logger:
+                self.logger.info(
+                    f"🔄 尝试内容安全净化（原风险={risk_level.name}）: {safety_reason[:80]}"
+                )
+            new_answer, new_citations, sanitize_llm_meta = self._sanitize_content(
+                question, answer_text, citations, safety_reason
+            )
+            if sanitize_llm_meta:
+                synthesis_llm_calls.append(sanitize_llm_meta)
+
+            if new_answer:
+                # 重新审核净化后的版本
+                try:
+                    retry_level, retry_reason, retry_llm_meta = self._check_content_safety(
+                        question, new_answer, new_citations
+                    )
+                except Exception as exc:
+                    if self.logger:
+                        self.logger.warning(f"安全净化后重审异常: {exc}")
+                    retry_level = RiskLevel.MEDIUM
+                    retry_reason = f"重审异常: {exc}"
+                    retry_llm_meta = None
+
+                if retry_llm_meta:
+                    synthesis_llm_calls.append(retry_llm_meta)
+
+                if retry_level == RiskLevel.SAFE:
+                    sanitize_attempted = True
+                    answer_text = new_answer
+                    citations = new_citations
+                    risk_level = RiskLevel.SAFE
+                    safety_reason = f"已通过净化去除不安全内容（原: {safety_reason}"
+                    if self.logger:
+                        self.logger.info("✅ 内容安全净化通过，使用净化后版本")
+                else:
+                    if self.logger:
+                        self.logger.warning(
+                            f"内容安全净化后仍不通过（{retry_level.name}）: {retry_reason}"
+                        )
+            else:
+                if self.logger:
+                    self.logger.info("内容安全净化后无可用内容，保持拦截")
+
+        # CHANGED: Token 用量汇总日志（含安全审核+净化调用）
         if self.logger and synthesis_llm_calls:
             total_prompt = sum(
                 c.get("input_tokens", 0) or 0 for c in synthesis_llm_calls
@@ -714,19 +867,10 @@ class VideoKnowledgeQA:
         if self.logger:
             self.logger.info(f"引用过滤: 保留 {len(citations)}/{citations_before} 个 citations，已重编号")
 
-        try:
-            # CHANGED: 必须串行——依赖最终答案内容和 citations，不能提前并发
-            risk_level, safety_reason = self._check_content_safety(question, answer_text, citations)
-        except Exception as exc:
-            if self.logger:
-                self.logger.warning(f"内容安全审核异常: {exc}")
-            risk_level = RiskLevel.MEDIUM
-            safety_reason = f"审核异常: {exc}"
-
         original_answer = answer_text
         original_citations = list(citations)
 
-        if risk_level == RiskLevel.MEDIUM or risk_level == RiskLevel.HIGH:
+        if risk_level >= RiskLevel.LOW:  # CHANGED: 调严审核——只有 SAFE(0) 才放行
             if self.logger:
                 self.logger.warning(
                     f"⚠️ 内容安全审核未通过！风险等级={risk_level.name}({risk_level.value}), "
@@ -741,12 +885,8 @@ class VideoKnowledgeQA:
             content_safety_flagged = True
         else:
             content_safety_flagged = False
-            if risk_level == RiskLevel.SAFE:
-                if self.logger:
-                    self.logger.info("✅ 内容安全审核通过（安全）")
-            else:
-                if self.logger:
-                    self.logger.info(f"ℹ️ 内容安全审核通过（低风险）: {safety_reason[:100]}")
+            if self.logger:
+                self.logger.info("✅ 内容安全审核通过（安全）")
 
         created_at = datetime.now().isoformat(timespec="seconds")
         result = {
