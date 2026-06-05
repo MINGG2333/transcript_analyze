@@ -341,6 +341,71 @@ class VideoKnowledgeQA:
     ) -> dict[str, Any]:
         self._ensure_client()
 
+        # ── 问题级高危敏感内容拦截（毒品/政治/暴力等，不问内容直接拒） ──
+        sensitive_messages = [
+            {
+                "role": "user",
+                "content": (
+                    "判断以下用户问题是否涉及以下**高危敏感话题**：\n"
+                    "- 毒品（吸毒、制毒、贩毒、毒品名称、毒品体验等）\n"
+                    "- 政治/政策（政治人物、政治事件、政党、政府、意识形态、政策法规、国家治理等）\n"
+                    "- 色情（露骨色情内容、色情资源等）\n"
+                    "- 暴力（恐怖主义、极端暴力、杀人等）\n"
+                    "- 违法活动（赌博、诈骗、洗钱等）\n\n"
+                    "注意：只要问题本身在询问/讨论这些话题，无论是否与陈嘉仪相关，也无论语境是正面还是负面，一律判为敏感。\n"
+                    "原则上，陈嘉仪作为公众人物，不应与毒品、政治、色情、暴力、违法活动等话题产生任何关联。\n\n"
+                    f"用户问题：{question}\n\n"
+                    '请输出JSON：{"sensitive": "yes"} 或 {"sensitive": "no"}'
+                ),
+            }
+        ]
+        try:
+            sensitive_result, _ = call_llm_json(
+                self.client, self.llm_model, sensitive_messages, "问题敏感度判断",
+                max_tokens=30, logger=self.logger, thinking_disabled=True,
+            )
+            is_sensitive = sensitive_result.get("sensitive", "no") == "yes"
+        except Exception as exc:
+            if self.logger:
+                self.logger.warning(f"问题敏感度判断异常: {exc}")
+            is_sensitive = False  # 异常时默认放行
+
+        if is_sensitive:
+            if self.logger:
+                self.logger.warning(f"❌ 问题涉及高危敏感话题，已拒绝: {question!r}")
+            result = {
+                "question": question,
+                "answer": "抱歉，我只了解与陈嘉仪相关的信息，请提出与陈嘉仪有关的问题。",
+                "citations": [],
+                "retrieved_count": 0,
+                "retrieval": {
+                    "vector_hits_raw": 0,
+                    "vector_hits_filtered": 0,
+                    "bm25_hits_raw": 0,
+                    "bm25_hits_filtered": 0,
+                    "raw_merged_ids": 0,
+                    "used_base_ids": 0,
+                    "candidate_count": 0,
+                    "truncated": False,
+                    "merged_ids_set": [],
+                    "merged_dict_scores": {},
+                },
+                "analysis_summary": {
+                    "total_candidates": 0,
+                    "useful_segment_count": 0,
+                    "analysis_batches": [],
+                    "analysis_batch_size": analysis_batch_size,
+                },
+                "useful_segment_count": 0,
+                "video_results": [],
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "content_safety_flagged": False,
+                "risk_level": 0,
+                "risk_label": "SAFE",
+                "safety_reason": "问题级拦截：高危敏感话题",
+            }
+            return result
+
         # CHANGED: 主题相关性判断——先判断问题是否与陈嘉仪相关
         relevance_messages = [
             {
