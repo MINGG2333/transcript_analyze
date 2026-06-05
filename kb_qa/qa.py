@@ -870,7 +870,7 @@ class VideoKnowledgeQA:
         original_answer = answer_text
         original_citations = list(citations)
 
-        if risk_level >= RiskLevel.LOW:  # CHANGED: 调严审核——只有 SAFE(0) 才放行
+        if risk_level >= RiskLevel.MEDIUM:  # 仅中/高风险才拦截，低风险放行
             if self.logger:
                 self.logger.warning(
                     f"⚠️ 内容安全审核未通过！风险等级={risk_level.name}({risk_level.value}), "
